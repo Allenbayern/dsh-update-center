@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-update-center
+      name: "@dsh-external/dsh-update-center"

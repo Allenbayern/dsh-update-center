@@ -1,0 +1,6 @@
+node_modules/
+lib/types/
+lib/*.map
+*.tsbuildinfo
+*.tgz
+.DS_Store
