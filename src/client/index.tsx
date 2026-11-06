@@ -69,6 +69,22 @@ const SOURCE_TEXT: Record<string, string> = {
   injected: '注入',
 }
 
+// ── 响应式断点（移动端适配）─────────────────────────────────────────────────
+
+function useIsMobile(breakpoint = 768): boolean {
+  const [isMobile, setIsMobile] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth <= breakpoint : false,
+  )
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const check = () => setIsMobile(window.innerWidth <= breakpoint)
+    check()
+    window.addEventListener('resize', check)
+    return () => window.removeEventListener('resize', check)
+  }, [breakpoint])
+  return isMobile
+}
+
 // ── 基础控件 ────────────────────────────────────────────────────────────────
 
 type BtnTone = 'primary' | 'default' | 'danger' | 'ghost'
@@ -169,30 +185,33 @@ function Section({
   action?: ReactNode
   children: ReactNode
 }) {
+  const isMobile = useIsMobile()
   return (
     <section
       style={{
         border: '1px solid ' + C.line,
-        borderRadius: 14,
+        borderRadius: isMobile ? 12 : 14,
         background: C.layer1,
         color: C.text,
         display: 'flex',
         flexDirection: 'column',
         boxShadow: '0 2px 10px rgba(0,0,0,.04)',
         overflow: 'hidden',
+        minWidth: 0,
       }}
     >
       <header
         style={{
           display: 'flex',
           alignItems: 'center',
+          flexWrap: 'wrap',
           gap: 8,
-          padding: '12px 16px 10px',
+          padding: isMobile ? '10px 12px 9px' : '12px 16px 10px',
           borderBottom: '1px solid ' + C.line,
           background: `color-mix(in srgb, ${C.layer2} 55%, transparent)`,
         }}
       >
-        <h3 style={{ margin: 0, fontSize: 14, fontWeight: 650, letterSpacing: 0.2, color: C.text }}>{title}</h3>
+        <h3 style={{ margin: 0, fontSize: isMobile ? 13.5 : 14, fontWeight: 650, letterSpacing: 0.2, color: C.text }}>{title}</h3>
         {count === undefined ? null : (
           <span
             style={{
@@ -207,9 +226,21 @@ function Section({
             {count}
           </span>
         )}
-        <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>{action}</span>
+        {action === undefined ? null : (
+          <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>{action}</span>
+        )}
       </header>
-      <div style={{ display: 'flex', flexDirection: 'column', padding: '4px 16px 12px', color: C.text }}>{children}</div>
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          padding: isMobile ? '4px 12px 10px' : '4px 16px 12px',
+          color: C.text,
+          minWidth: 0,
+        }}
+      >
+        {children}
+      </div>
     </section>
   )
 }
@@ -231,6 +262,7 @@ function Stat({
   active?: boolean
   onClick?: () => void
 }) {
+  const isMobile = useIsMobile()
   return (
     <div
       onClick={onClick}
@@ -248,29 +280,55 @@ function Stat({
       }
       style={{
         flex: '1 1 0',
-        minWidth: 135,
+        minWidth: 0,
         border: '1px solid ' + (active ? '#2563eb' : C.line),
         borderTop: `3px solid ${active ? '#2563eb' : tone}`,
-        borderRadius: 12,
+        borderRadius: isMobile ? 10 : 12,
         backgroundColor: C.layer1,
         background: active ? `color-mix(in srgb, ${C.brand} 14%, ${C.layer1})` : C.layer1,
         color: C.text,
-        padding: '11px 14px',
+        padding: isMobile ? '8px 10px' : '11px 14px',
         display: 'flex',
         flexDirection: 'column',
-        gap: 4,
+        gap: isMobile ? 2 : 4,
         cursor: onClick ? 'pointer' : 'default',
         boxShadow: active ? '0 4px 14px rgba(59,130,246,.16)' : '0 1px 4px rgba(0,0,0,.03)',
         transition: 'all .16s ease',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
-        <span style={{ fontSize: 11.5, color: active ? C.brand : C.dim, fontWeight: active ? 650 : 500 }}>{label}</span>
-        {icon ? <span style={{ fontSize: 14, lineHeight: 1 }}>{icon}</span> : null}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4, minWidth: 0 }}>
+        <span
+          style={{
+            fontSize: isMobile ? 11 : 11.5,
+            color: active ? C.brand : C.dim,
+            fontWeight: active ? 650 : 500,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {label}
+        </span>
+        {icon ? <span style={{ fontSize: isMobile ? 12.5 : 14, lineHeight: 1, flexShrink: 0 }}>{icon}</span> : null}
       </div>
-      <span style={{ fontSize: 20, fontWeight: 700, color: tone, lineHeight: '26px', letterSpacing: -0.2 }}>{value}</span>
+      <span
+        style={{
+          fontSize: isMobile ? 16 : 20,
+          fontWeight: 700,
+          color: tone,
+          lineHeight: isMobile ? '21px' : '26px',
+          letterSpacing: -0.2,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}
+      >
+        {value}
+      </span>
       {hint === undefined ? null : (
-        <span style={{ fontSize: 11, color: C.dim, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{hint}</span>
+        <span style={{ fontSize: isMobile ? 10.5 : 11, color: C.dim, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {hint}
+        </span>
       )}
     </div>
   )
@@ -282,11 +340,12 @@ function Row({ children, last }: { children: ReactNode; last?: boolean }) {
       style={{
         display: 'flex',
         alignItems: 'center',
-        gap: 12,
+        gap: 10,
         padding: '9px 0',
         borderBottom: last === true ? 'none' : '1px solid ' + C.line,
         flexWrap: 'wrap',
         color: C.text,
+        minWidth: 0,
       }}
     >
       {children}
@@ -315,6 +374,7 @@ function Name({ children, title }: { children: ReactNode; title?: string }) {
 }
 
 function Meta({ children, title }: { children: ReactNode; title?: string }) {
+  const isMobile = useIsMobile()
   return (
     <span
       title={title}
@@ -323,7 +383,9 @@ function Meta({ children, title }: { children: ReactNode; title?: string }) {
         color: C.dim,
         overflow: 'hidden',
         textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
+        whiteSpace: isMobile ? 'normal' : 'nowrap',
+        wordBreak: isMobile ? 'break-word' : 'normal',
+        lineHeight: isMobile ? '16px' : undefined,
       }}
     >
       {children}
@@ -333,7 +395,9 @@ function Meta({ children, title }: { children: ReactNode; title?: string }) {
 
 function Actions({ children }: { children: ReactNode }) {
   return (
-    <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>{children}</span>
+    <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0, flexWrap: 'wrap' }}>
+      {children}
+    </span>
   )
 }
 
@@ -984,9 +1048,10 @@ function InfraSection({
     <div
       style={{
         display: 'grid',
-        gridTemplateColumns: activeTab === 'overview' ? 'repeat(auto-fit, minmax(420px, 1fr))' : '1fr',
+        gridTemplateColumns: activeTab === 'overview' && !useIsMobile() ? 'repeat(auto-fit, minmax(420px, 1fr))' : '1fr',
         gap: 14,
         alignItems: 'start',
+        minWidth: 0,
       }}
     >
       {showDocker ? (
@@ -2564,6 +2629,8 @@ export function PanelPage() {
     cleanupActionableCount +
     (systemdFailedCount > 0 ? 1 : 0)
 
+  const isMobile = useIsMobile()
+
   return (
     <div
       data-dsh-plugin="dsh-update-center"
@@ -2571,59 +2638,90 @@ export function PanelPage() {
       style={{
         height: '100%',
         overflowY: 'auto',
-        padding: '0 22px 36px',
+        overflowX: 'hidden',
+        padding: isMobile ? '0 10px 28px' : '0 22px 36px',
         display: 'flex',
         flexDirection: 'column',
-        gap: 14,
+        gap: isMobile ? 10 : 14,
         background: C.base,
         color: C.text,
         fontSize: 13,
       }}
     >
-      {/* 吸顶全景导航与操作栏：修复暗色模式白底白字，统一使用 --dsw-alias-bg-base + 毛玻璃 */}
+      {/* 吸顶全景导航与操作栏：修复暗色模式白底白字，移动端紧凑横向滑轨适配 */}
       <div
         style={{
           position: 'sticky',
           top: 0,
           zIndex: 20,
           backgroundColor: C.base,
-          background: `color-mix(in srgb, ${C.base} 92%, transparent)`,
+          background: `color-mix(in srgb, ${C.base} 94%, transparent)`,
           backdropFilter: 'blur(12px)',
           WebkitBackdropFilter: 'blur(12px)',
-          paddingTop: 14,
-          paddingBottom: 10,
+          paddingTop: isMobile ? 10 : 14,
+          paddingBottom: isMobile ? 8 : 10,
           borderBottom: '1px solid ' + C.line,
           display: 'flex',
           flexDirection: 'column',
-          gap: 10,
+          gap: isMobile ? 7 : 10,
           color: C.text,
         }}
       >
-        <header style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <header style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 8 : 12, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 8 : 10, minWidth: 0, flex: isMobile ? '1 1 100%' : '0 1 auto' }}>
             <span
               style={{
-                width: 10,
-                height: 10,
+                width: isMobile ? 8 : 10,
+                height: isMobile ? 8 : 10,
                 borderRadius: 999,
                 background: totalActionable > 0 ? '#3b82f6' : '#22c55e',
                 boxShadow: totalActionable > 0 ? '0 0 10px #3b82f6' : '0 0 10px #22c55e',
                 flexShrink: 0,
               }}
             />
-            <h2 style={{ margin: 0, fontSize: 17.5, fontWeight: 700, letterSpacing: 0.2, color: C.text }}>全栈运维更新中心</h2>
-            <Tag tone={totalActionable > 0 ? C.brand : C.ok}>
-              {totalActionable > 0 ? `${totalActionable} 项可处理` : '全栈健康 · 0 待更'}
-            </Tag>
+            <h2
+              style={{
+                margin: 0,
+                fontSize: isMobile ? 15.5 : 17.5,
+                fontWeight: 700,
+                letterSpacing: 0.2,
+                color: C.text,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              全栈运维更新中心
+            </h2>
+            <span style={{ marginLeft: isMobile ? 'auto' : 0, flexShrink: 0 }}>
+              <Tag tone={totalActionable > 0 ? C.brand : C.ok}>
+                {totalActionable > 0 ? `${totalActionable} 项可处理` : '全栈健康 · 0 待更'}
+              </Tag>
+            </span>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', flexWrap: 'wrap' }}>
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: isMobile ? 6 : 8,
+              marginLeft: isMobile ? 0 : 'auto',
+              width: isMobile ? '100%' : 'auto',
+              flexWrap: 'wrap',
+            }}
+          >
             <Btn
               size="sm"
               tone={onlyActionable ? 'primary' : 'default'}
               onClick={() => setOnlyActionable((v) => !v)}
               title="切换是否隐藏已是最新状态的条目，聚焦待处理项与门禁锁定项"
             >
-              {onlyActionable ? '🔍 仅看待处理/锁定 (已开启)' : '🔍 仅看待处理/锁定'}
+              {isMobile
+                ? onlyActionable
+                  ? '🔍 仅待处理 ✓'
+                  : '🔍 仅待处理'
+                : onlyActionable
+                  ? '🔍 仅看待处理/锁定 (已开启)'
+                  : '🔍 仅看待处理/锁定'}
             </Btn>
             <Btn
               size="sm"
@@ -2634,54 +2732,115 @@ export function PanelPage() {
               disabled={scanning || infraLoading || anyBusy}
               title="同时刷新 DSH 上游版本与跨节点 Docker/APT/工具链/.venv 状态"
             >
-              {scanning || infraLoading ? '⏳ 全栈扫描中…' : '🔄 全栈刷新'}
+              {scanning || infraLoading ? '⏳ 扫描中…' : isMobile ? '🔄 刷新' : '🔄 全栈刷新'}
             </Btn>
-            <Btn
-              tone="primary"
-              size="md"
-              disabled={scanning || infraLoading || anyBusy || sequentialActionableCount === 0}
-              onClick={() => void runFullSequentialUpdate()}
-              title="按安全顺序依次自动执行全栈所有可处理项：DSH插件 → Docker容器 → 系统APT → 工具链 → Python .venv → Git同步 → 缓存瘦身 → Systemd重置"
-            >
-              {fullRunning
-                ? `⏳ 顺序更新中 (${fullPipeline?.done ?? 0}/${fullPipeline?.total ?? 0})…`
-                : anyBusy
-                  ? '⏸ 等待当前任务…'
-                  : `⚡ 一键更新全部（${sequentialActionableCount}）`}
-            </Btn>
-            <Btn
-              size="sm"
-              disabled={scanning || anyBusy || stableUpdates === 0}
-              onClick={() => void updateAll('stable')}
-              title="仅串行更新所有有正式版更新的 DSH 套件，不重启服务"
-            >
-              {batchRunning ? '⏳ 批量进行中…' : anyBusy ? '⏸ 等待…' : '仅更插件（' + stableUpdates + '）'}
-            </Btn>
-            {previewUpdates > stableUpdates ? (
-              <Btn size="sm" disabled={scanning || anyBusy} onClick={() => void updateAll('preview')} title="把仅预览版更新的套件也算进来">
-                {anyBusy ? '⏸ 等待…' : `含预览（${previewUpdates}）`}
-              </Btn>
-            ) : null}
+            {isMobile ? (
+              <button
+                type="button"
+                disabled={scanning || infraLoading || anyBusy || sequentialActionableCount === 0}
+                onClick={() => void runFullSequentialUpdate()}
+                style={{
+                  appearance: 'none',
+                  WebkitAppearance: 'none',
+                  marginLeft: 'auto',
+                  height: 28,
+                  padding: '0 11px',
+                  borderRadius: 8,
+                  border:
+                    sequentialActionableCount > 0 && !anyBusy
+                      ? '1px solid #10b981'
+                      : '1px solid ' + C.line2,
+                  backgroundColor:
+                    sequentialActionableCount > 0 && !anyBusy ? '#059669' : C.layer2,
+                  backgroundImage:
+                    sequentialActionableCount > 0 && !anyBusy
+                      ? 'linear-gradient(135deg, #059669 0%, #10b981 100%)'
+                      : 'none',
+                  color: sequentialActionableCount > 0 && !anyBusy ? '#ffffff' : C.dim,
+                  fontSize: 11.5,
+                  fontWeight: 700,
+                  cursor:
+                    scanning || infraLoading || anyBusy || sequentialActionableCount === 0
+                      ? 'not-allowed'
+                      : 'pointer',
+                  opacity:
+                    scanning || infraLoading || anyBusy || sequentialActionableCount === 0 ? 0.65 : 1,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {fullRunning
+                  ? `⏳ 更新中 (${fullPipeline?.done ?? 0}/${fullPipeline?.total ?? 0})`
+                  : anyBusy
+                    ? '⏸ 队列中…'
+                    : sequentialActionableCount > 0
+                      ? `⚡ 一键全更 (${sequentialActionableCount})`
+                      : '✓ 已最新'}
+              </button>
+            ) : (
+              <>
+                <Btn
+                  tone="primary"
+                  size="md"
+                  disabled={scanning || infraLoading || anyBusy || sequentialActionableCount === 0}
+                  onClick={() => void runFullSequentialUpdate()}
+                  title="按安全顺序依次自动执行全栈所有可处理项：DSH插件 → Docker容器 → 系统APT → 工具链 → Python .venv → Git同步 → 缓存瘦身 → Systemd重置"
+                >
+                  {fullRunning
+                    ? `⏳ 顺序更新中 (${fullPipeline?.done ?? 0}/${fullPipeline?.total ?? 0})…`
+                    : anyBusy
+                      ? '⏸ 等待当前任务…'
+                      : `⚡ 一键更新全部（${sequentialActionableCount}）`}
+                </Btn>
+                <Btn
+                  size="sm"
+                  disabled={scanning || anyBusy || stableUpdates === 0}
+                  onClick={() => void updateAll('stable')}
+                  title="仅串行更新所有有正式版更新的 DSH 套件，不重启服务"
+                >
+                  {batchRunning ? '⏳ 批量进行中…' : anyBusy ? '⏸ 等待…' : '仅更插件（' + stableUpdates + '）'}
+                </Btn>
+                {previewUpdates > stableUpdates ? (
+                  <Btn size="sm" disabled={scanning || anyBusy} onClick={() => void updateAll('preview')} title="把仅预览版更新的套件也算进来">
+                    {anyBusy ? '⏸ 等待…' : `含预览（${previewUpdates}）`}
+                  </Btn>
+                ) : null}
+              </>
+            )}
           </div>
         </header>
 
-        {/* 分区快捷切换胶囊条（分两层展示：上层系统与容器核心，下层工程与系统维护 + 一键顺序更新胶囊） */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {/* 分区快捷切换胶囊条（桌面端分两层展示；移动端支持横向丝滑滑动不换行，修复角标白底白字） */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: isMobile ? 5 : 6 }}>
           {[
-            { tag: '核心层', items: tabRowPrimary, showQuickAll: true },
+            { tag: '核心层', items: tabRowPrimary, showQuickAll: !isMobile },
             { tag: '维护层', items: tabRowSecondary, showQuickAll: false },
           ].map((rowGroup) => (
-            <div key={rowGroup.tag} style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+            <div
+              key={rowGroup.tag}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                flexWrap: isMobile ? 'nowrap' : 'wrap',
+                overflowX: isMobile ? 'auto' : 'visible',
+                WebkitOverflowScrolling: 'touch',
+                scrollbarWidth: 'none',
+                paddingBottom: isMobile ? 2 : 0,
+              }}
+            >
               <span
                 style={{
                   fontSize: 10.5,
                   fontWeight: 700,
                   color: C.dim,
-                  padding: '2px 7px',
+                  padding: isMobile ? '2px 5px' : '2px 7px',
                   borderRadius: 6,
                   background: C.layer2,
                   border: '1px solid ' + C.line,
-                  minWidth: 48,
+                  minWidth: isMobile ? 42 : 48,
                   textAlign: 'center',
                   flexShrink: 0,
                 }}
@@ -2690,6 +2849,13 @@ export function PanelPage() {
               </span>
               {rowGroup.items.map((tab) => {
                 const isAct = activeTab === tab.id
+                const badgeBg = isAct
+                  ? '#ffffff'
+                  : tab.tone === C.err
+                    ? '#dc2626'
+                    : tab.tone === C.warn
+                      ? '#d97706'
+                      : '#2563eb'
                 return (
                   <button
                     key={tab.id}
@@ -2698,19 +2864,21 @@ export function PanelPage() {
                     style={{
                       appearance: 'none',
                       WebkitAppearance: 'none',
-                      height: 28,
-                      padding: '0 12px',
+                      height: isMobile ? 26 : 28,
+                      padding: isMobile ? '0 10px' : '0 12px',
                       borderRadius: 999,
                       border: '1px solid ' + (isAct ? '#2563eb' : C.line2),
                       backgroundColor: isAct ? '#2563eb' : C.layer2,
                       backgroundImage: isAct ? 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)' : 'none',
                       color: isAct ? '#ffffff' : C.text,
-                      fontSize: 12,
+                      fontSize: isMobile ? 11.5 : 12,
                       fontWeight: isAct ? 650 : 500,
                       cursor: 'pointer',
                       display: 'inline-flex',
                       alignItems: 'center',
-                      gap: 6,
+                      gap: 5,
+                      flexShrink: 0,
+                      whiteSpace: 'nowrap',
                       boxShadow: isAct ? '0 2px 8px rgba(37,99,235,.28)' : 'none',
                       transition: 'all .15s ease',
                     }}
@@ -2724,8 +2892,9 @@ export function PanelPage() {
                           fontSize: 10.5,
                           lineHeight: '16px',
                           fontWeight: 700,
-                          background: isAct ? '#ffffff' : (tab.tone ?? C.brand),
+                          backgroundColor: badgeBg,
                           color: isAct ? '#1d4ed8' : '#ffffff',
+                          flexShrink: 0,
                         }}
                       >
                         {tab.badge}
@@ -2773,6 +2942,8 @@ export function PanelPage() {
                     display: 'inline-flex',
                     alignItems: 'center',
                     gap: 6,
+                    flexShrink: 0,
+                    whiteSpace: 'nowrap',
                     boxShadow:
                       sequentialActionableCount > 0 && !anyBusy
                         ? '0 2px 10px rgba(16,185,129,.32)'
@@ -2796,32 +2967,32 @@ export function PanelPage() {
         </div>
       </div>
 
-      {/* AI 视觉主控台 Hero 横幅（明暗双模式高对比自适应，固定深邃黑曜石渐变底衬托纯白文字） */}
+      {/* AI 视觉主控台 Hero 横幅（明暗双模式高对比自适应，移动端紧凑化布局） */}
       <div
         style={{
           position: 'relative',
-          borderRadius: 16,
+          borderRadius: isMobile ? 12 : 16,
           overflow: 'hidden',
           border: '1px solid rgba(59,130,246,.32)',
           background: '#0b0f19',
-          backgroundImage: `linear-gradient(90deg, rgba(9,13,24,0.95) 0%, rgba(9,13,24,0.82) 48%, rgba(9,13,24,0.25) 100%), url("${HERO_BANNER_DATA_URL}")`,
+          backgroundImage: `linear-gradient(90deg, rgba(9,13,24,0.96) 0%, rgba(9,13,24,0.86) 55%, rgba(9,13,24,0.35) 100%), url("${HERO_BANNER_DATA_URL}")`,
           backgroundSize: 'cover',
           backgroundPosition: 'right center',
-          padding: '18px 22px',
+          padding: isMobile ? '12px 14px' : '18px 22px',
           color: '#f8fafc',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          gap: 16,
+          gap: isMobile ? 10 : 16,
           flexWrap: 'wrap',
           boxShadow: '0 6px 20px rgba(0,0,0,.18)',
         }}
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: 640 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: isMobile ? 4 : 6, maxWidth: 640, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <span
               style={{
-                fontSize: 10.5,
+                fontSize: isMobile ? 10 : 10.5,
                 fontWeight: 700,
                 letterSpacing: 0.8,
                 textTransform: 'uppercase',
@@ -2834,26 +3005,28 @@ export function PanelPage() {
             >
               DSH OPS COMMAND CENTER
             </span>
-            <span style={{ fontSize: 11.5, color: '#94a3b8' }}>
-              VM100 · PVE · iStoreOS · fnOS 四节点全栈协同
-            </span>
+            {!isMobile ? (
+              <span style={{ fontSize: 11.5, color: '#94a3b8' }}>
+                VM100 · PVE · iStoreOS · fnOS 四节点全栈协同
+              </span>
+            ) : null}
           </div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: '#ffffff', letterSpacing: 0.2 }}>
+          <div style={{ fontSize: isMobile ? 14.5 : 18, fontWeight: 700, color: '#ffffff', letterSpacing: 0.2 }}>
             {totalActionable === 0
               ? '✨ 全栈 9 大维度组件均已对齐最新安全基线'
               : `⚡ 检测到 ${totalActionable} 项待处理更新、清理或巡检项`}
           </div>
-          <div style={{ fontSize: 12, color: '#cbd5e1', lineHeight: '18px' }}>
+          <div style={{ fontSize: isMobile ? 11 : 12, color: '#cbd5e1', lineHeight: isMobile ? '16px' : '18px' }}>
             {snapshot === undefined
               ? '正在拉取本机与跨节点状态快照…'
               : snapshot.partial === true
                 ? '本机事实已就绪 · 上游版本后台查询中'
                 : `DSH 扫描于 ${fmtAge(snapshot.ageSeconds)}${refreshing ? '（后台刷新中）' : ''}${
-                    infra?.generatedAt ? ` ｜ 跨节点快照：${infra.generatedAt.replace('T', ' ').slice(0, 19)}` : ''
+                    infra?.generatedAt && !isMobile ? ` ｜ 跨节点快照：${infra.generatedAt.replace('T', ' ').slice(0, 19)}` : ''
                   }`}
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 8 : 10, flexWrap: 'wrap', width: isMobile ? '100%' : 'auto' }}>
           <button
             type="button"
             disabled={scanning || infraLoading || anyBusy || sequentialActionableCount === 0}
@@ -2862,9 +3035,11 @@ export function PanelPage() {
             style={{
               appearance: 'none',
               WebkitAppearance: 'none',
-              height: 44,
-              padding: '0 18px',
-              borderRadius: 10,
+              height: isMobile ? 36 : 44,
+              padding: isMobile ? '0 14px' : '0 18px',
+              width: isMobile ? '100%' : 'auto',
+              justifyContent: 'center',
+              borderRadius: isMobile ? 8 : 10,
               border:
                 sequentialActionableCount > 0 && !anyBusy
                   ? '1px solid #34d399'
@@ -2878,7 +3053,7 @@ export function PanelPage() {
                   ? 'linear-gradient(135deg, #059669 0%, #10b981 100%)'
                   : 'none',
               color: '#ffffff',
-              fontSize: 13.5,
+              fontSize: isMobile ? 12.5 : 13.5,
               fontWeight: 700,
               cursor:
                 scanning || infraLoading || anyBusy || sequentialActionableCount === 0
@@ -2908,40 +3083,44 @@ export function PanelPage() {
                     : '✨ 全栈已最新 (0 待处理)'}
             </span>
           </button>
-          <div
-            style={{
-              background: 'rgba(15,23,42,.75)',
-              backdropFilter: 'blur(8px)',
-              border: '1px solid rgba(148,163,184,.25)',
-              borderRadius: 10,
-              padding: '8px 14px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 2,
-            }}
-          >
-            <span style={{ fontSize: 10.5, color: '#94a3b8' }}>安全护栏</span>
-            <span style={{ fontSize: 12.5, fontWeight: 650, color: '#4ade80' }}>
-              🔒 {dockerLocked} 容器锁 · {aptLockedCount} 内核锁
-            </span>
-          </div>
-          <div
-            style={{
-              background: 'rgba(15,23,42,.75)',
-              backdropFilter: 'blur(8px)',
-              border: '1px solid rgba(148,163,184,.25)',
-              borderRadius: 10,
-              padding: '8px 14px',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 2,
-            }}
-          >
-            <span style={{ fontSize: 10.5, color: '#94a3b8' }}>当前视图</span>
-            <span style={{ fontSize: 12.5, fontWeight: 650, color: '#60a5fa' }}>
-              {tabs.find((t) => t.id === activeTab)?.label ?? '全景工作台'}
-            </span>
-          </div>
+          {!isMobile ? (
+            <>
+              <div
+                style={{
+                  background: 'rgba(15,23,42,.75)',
+                  backdropFilter: 'blur(8px)',
+                  border: '1px solid rgba(148,163,184,.25)',
+                  borderRadius: 10,
+                  padding: '8px 14px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 2,
+                }}
+              >
+                <span style={{ fontSize: 10.5, color: '#94a3b8' }}>安全护栏</span>
+                <span style={{ fontSize: 12.5, fontWeight: 650, color: '#4ade80' }}>
+                  🔒 {dockerLocked} 容器锁 · {aptLockedCount} 内核锁
+                </span>
+              </div>
+              <div
+                style={{
+                  background: 'rgba(15,23,42,.75)',
+                  backdropFilter: 'blur(8px)',
+                  border: '1px solid rgba(148,163,184,.25)',
+                  borderRadius: 10,
+                  padding: '8px 14px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 2,
+                }}
+              >
+                <span style={{ fontSize: 10.5, color: '#94a3b8' }}>当前视图</span>
+                <span style={{ fontSize: 12.5, fontWeight: 650, color: '#60a5fa' }}>
+                  {tabs.find((t) => t.id === activeTab)?.label ?? '全景工作台'}
+                </span>
+              </div>
+            </>
+          ) : null}
         </div>
       </div>
 
@@ -3174,9 +3353,15 @@ export function PanelPage() {
             />
           )}
 
-          {/* 首屏 9 大全栈状态卡片：显式分为上下两层（第一层：5 项核心运行与基础设施；第二层：4 项工程仓库与系统治理） */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: 10 }}>
+          {/* 首屏 9 大全栈状态卡片：显式分为上下两层（桌面端 5+4，移动端 2 列紧凑网格） */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: isMobile ? 8 : 10 }}>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: isMobile ? 'repeat(2, minmax(0, 1fr))' : 'repeat(auto-fit, minmax(175px, 1fr))',
+                gap: isMobile ? 8 : 10,
+              }}
+            >
               <Stat
                 label="DSH 本体"
                 icon="🧠"
@@ -3224,7 +3409,13 @@ export function PanelPage() {
               />
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 10 }}>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: isMobile ? 'repeat(2, minmax(0, 1fr))' : 'repeat(auto-fit, minmax(210px, 1fr))',
+                gap: isMobile ? 8 : 10,
+              }}
+            >
               <Stat
                 label="Python 虚拟环境"
                 icon="🐍"
@@ -3269,8 +3460,8 @@ export function PanelPage() {
               <div
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))',
-                  gap: 14,
+                  gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fit, minmax(400px, 1fr))',
+                  gap: isMobile ? 10 : 14,
                   alignItems: 'start',
                 }}
               >
@@ -3293,8 +3484,8 @@ export function PanelPage() {
               <div
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
-                  gap: 14,
+                  gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fit, minmax(420px, 1fr))',
+                  gap: isMobile ? 10 : 14,
                   alignItems: 'start',
                 }}
               >
@@ -3517,7 +3708,14 @@ export function PanelPage() {
 
           {showHistory ? (
             <>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(380px, 1fr))', gap: 14, alignItems: 'start' }}>
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fit, minmax(380px, 1fr))',
+                  gap: isMobile ? 10 : 14,
+                  alignItems: 'start',
+                }}
+              >
                 <HistoryCard entries={history} />
                 <LogBox />
               </div>
