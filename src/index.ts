@@ -168,6 +168,39 @@ export function apply(ctx: Context, config: Config): void {
   let cached: { at: number; snapshot: Snapshot } | undefined
   /** 后台刷新（单飞）：面板打开时旧数据先上屏，这份 Promise 在背后把新数据补上。 */
   let refreshing: Promise<Snapshot | undefined> | undefined
+  /** 全局执行锁：防止用户在某项更新进行中并发点击其它更新按钮导致状态覆盖或冲突。 */
+  let activeOperation: { key: string; label: string; startedAt: number } | null = null
+
+  /** 单项更新或转线上成功后，立即原地更新缓存快照中的对应条目状态，避免下次读取返回旧的“可更新”状态。 */
+  const markBundleUpdatedInCache = (targetName: string, toVersion: string, convertedToRegistry = false): void => {
+    if (cached === undefined) return
+    const nextBundles = cached.snapshot.bundles.map((row) => {
+      if (row.name !== targetName) return row
+      const nextSource = convertedToRegistry ? 'registry' : row.source
+      const stillHasPreview =
+        row.preview !== undefined && compareVersions(row.preview.version, toVersion) > 0
+      return {
+        ...row,
+        installed: toVersion,
+        source: nextSource,
+        updatable: true,
+        status: stillHasPreview ? ('preview-only' as const) : ('latest' as const),
+      }
+    })
+    const stableUpdates = nextBundles.filter((b) => b.status === 'update').length
+    const previewUpdates = nextBundles.filter((b) => b.status === 'update' || b.status === 'preview-only').length
+    const nextSnapshot: Snapshot = {
+      ...cached.snapshot,
+      bundles: nextBundles,
+      summary: {
+        ...cached.snapshot.summary,
+        stableUpdates,
+        previewUpdates,
+      },
+    }
+    cached = { at: Date.now(), snapshot: nextSnapshot }
+    writeSnapshotCache(nextSnapshot)
+  }
 
   const pushLog = (entry: Omit<LogEntry, 'seq'>): void => {
     logSeq += 1
@@ -344,7 +377,7 @@ export function apply(ctx: Context, config: Config): void {
             ? '已下载安装，但这个包需要重启 DSH 才生效（本插件不会重启）'
             : '更新未完全成功：' + String(result?.result?.error?.code ?? application)
       const payload: ApplyResult = {
-        ok: application === 'applied' || application === 'overridden',
+        ok: application === 'applied' || application === 'overridden' || application === 'restart-required',
         name: target,
         from: String(result?.from ?? ''),
         to: String(result?.to ?? version),
@@ -362,7 +395,12 @@ export function apply(ctx: Context, config: Config): void {
               },
             }),
       }
-      invalidate()
+      if (payload.ok && payload.to !== undefined) {
+        markBundleUpdatedInCache(target, payload.to, false)
+      } else {
+        invalidate()
+      }
+      startRefresh()
       if (application === 'restart-required') {
         // 装好了但要重启：记进待重启清单，面板一打开就提醒（跨会话有效）。
         addPendingRestart([
@@ -515,6 +553,13 @@ export function apply(ctx: Context, config: Config): void {
           path: API + '/update',
           handler: async (req: any, res: any) => {
             if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method-not-allowed' })
+            if (activeOperation !== null || batch.running()) {
+              return json(res, 409, {
+                ok: false,
+                message: `当前正在执行「${activeOperation?.label ?? '批量更新'}」，请等待完成后再操作`,
+                activeOperation,
+              })
+            }
             let body: any
             try {
               body = await readBody(req)
@@ -524,8 +569,13 @@ export function apply(ctx: Context, config: Config): void {
             const target = typeof body?.name === 'string' ? body.name : ''
             const version = typeof body?.version === 'string' ? body.version : ''
             if (target === '' || version === '') return json(res, 400, { ok: false, error: 'name 与 version 必填' })
-            const result = await applyUpdate(target, version)
-            json(res, result.ok ? 200 : 409, result)
+            activeOperation = { key: `${target}@${version}`, label: `${target} → ${version}`, startedAt: Date.now() }
+            try {
+              const result = await applyUpdate(target, version)
+              json(res, result.ok ? 200 : 409, result)
+            } finally {
+              activeOperation = null
+            }
           },
         },
         {
@@ -534,6 +584,13 @@ export function apply(ctx: Context, config: Config): void {
           path: API + '/convert',
           handler: async (req: any, res: any) => {
             if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method-not-allowed' })
+            if (activeOperation !== null || batch.running()) {
+              return json(res, 409, {
+                ok: false,
+                message: `当前正在执行「${activeOperation?.label ?? '批量更新'}」，请等待完成后再操作`,
+                activeOperation,
+              })
+            }
             let body: any
             try {
               body = await readBody(req)
@@ -546,42 +603,52 @@ export function apply(ctx: Context, config: Config): void {
             if (version !== '' && !isSafeVersion(version)) {
               return json(res, 400, { ok: false, error: 'version 必须是合法 semver' })
             }
-            pushLog({ at: Date.now(), kind: 'state', stream: 'state', text: '开始转线上 ' + name })
-            const result = await convertToRegistry(pluginManager(), {
-              name,
-              ...(version === '' ? {} : { version }),
-              registry: config.registry,
-              timeoutMs: config.timeoutMs,
-              injected: body?.injected === true,
-              confirmOverwrite: body?.confirmOverwrite === true,
-            })
-            invalidate()
-            if (result.ok && result.application === 'restart-required') {
-              addPendingRestart([
-                {
-                  name,
-                  at: new Date().toISOString(),
-                  ...(result.from === undefined ? {} : { from: result.from }),
-                  to: String(result.to ?? version),
-                  ...(result.restartReason === undefined ? {} : { reason: result.restartReason }),
-                },
-              ])
-            }
-            pushLog({ at: Date.now(), kind: 'state', stream: 'state', text: '转线上结束 ' + name + '：' + String(result.message ?? '') })
-            appendHistory(
-              {
-                at: new Date().toISOString(),
-                kind: 'convert',
+            activeOperation = { key: `convert:${name}`, label: `转为线上 ${name}`, startedAt: Date.now() }
+            try {
+              pushLog({ at: Date.now(), kind: 'state', stream: 'state', text: '开始转线上 ' + name })
+              const result = await convertToRegistry(pluginManager(), {
                 name,
-                ...(result.from === undefined ? {} : { from: result.from }),
-                ...(result.to === undefined ? {} : { to: result.to }),
-                ok: result.ok,
-                ...(result.application === undefined ? {} : { application: result.application }),
-                ...(result.message === undefined ? {} : { message: result.message }),
-              },
-              config.historyLimit,
-            )
-            json(res, result.ok ? 200 : 409, result)
+                ...(version === '' ? {} : { version }),
+                registry: config.registry,
+                timeoutMs: config.timeoutMs,
+                injected: body?.injected === true,
+                confirmOverwrite: body?.confirmOverwrite === true,
+              })
+              if (result.ok && result.to !== undefined) {
+                markBundleUpdatedInCache(name, String(result.to), true)
+              } else {
+                invalidate()
+              }
+              startRefresh()
+              if (result.ok && result.application === 'restart-required') {
+                addPendingRestart([
+                  {
+                    name,
+                    at: new Date().toISOString(),
+                    ...(result.from === undefined ? {} : { from: result.from }),
+                    to: String(result.to ?? version),
+                    ...(result.restartReason === undefined ? {} : { reason: result.restartReason }),
+                  },
+                ])
+              }
+              pushLog({ at: Date.now(), kind: 'state', stream: 'state', text: '转线上结束 ' + name + '：' + String(result.message ?? '') })
+              appendHistory(
+                {
+                  at: new Date().toISOString(),
+                  kind: 'convert',
+                  name,
+                  ...(result.from === undefined ? {} : { from: result.from }),
+                  ...(result.to === undefined ? {} : { to: result.to }),
+                  ok: result.ok,
+                  ...(result.application === undefined ? {} : { application: result.application }),
+                  ...(result.message === undefined ? {} : { message: result.message }),
+                },
+                config.historyLimit,
+              )
+              json(res, result.ok ? 200 : 409, result)
+            } finally {
+              activeOperation = null
+            }
           },
         },
         {
@@ -846,27 +913,39 @@ export function apply(ctx: Context, config: Config): void {
           path: API + '/infra/docker-update',
           handler: async (req: any, res: any) => {
             if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method-not-allowed' })
+            if (activeOperation !== null || batch.running()) {
+              return json(res, 409, {
+                ok: false,
+                message: `当前正在执行「${activeOperation?.label ?? '批量更新'}」，请等待完成后再操作`,
+                activeOperation,
+              })
+            }
             const body = await readBody(req)
             const node = String(body?.node ?? 'local').trim()
             const name = String(body?.name ?? '').trim()
             if (!node || !name) {
               return json(res, 400, { ok: false, message: '需要合法的 node 与容器 name' })
             }
-            pushLog({ at: Date.now(), kind: 'state', text: `[infra] 开始更新容器 ${node}:${name}` })
-            const result = await updateDockerContainer(node, name)
-            pushLog({ at: Date.now(), kind: result.ok ? 'state' : 'log', text: `[infra] ${result.message}` })
-            appendHistory(
-              {
-                at: new Date().toISOString(),
-                kind: 'docker',
-                name: `${node}:${name}`,
-                ok: result.ok,
-                message: result.message,
-              },
-              config.historyLimit,
-            )
-            const infra = await scanInfra({ refresh: true })
-            json(res, result.ok ? 200 : 500, { ...result, infra })
+            activeOperation = { key: `docker:${node}:${name}`, label: `更新容器 ${node}:${name}`, startedAt: Date.now() }
+            try {
+              pushLog({ at: Date.now(), kind: 'state', text: `[infra] 开始更新容器 ${node}:${name}` })
+              const result = await updateDockerContainer(node, name)
+              pushLog({ at: Date.now(), kind: result.ok ? 'state' : 'log', text: `[infra] ${result.message}` })
+              appendHistory(
+                {
+                  at: new Date().toISOString(),
+                  kind: 'docker',
+                  name: `${node}:${name}`,
+                  ok: result.ok,
+                  message: result.message,
+                },
+                config.historyLimit,
+              )
+              const infra = await scanInfra({ refresh: true })
+              json(res, result.ok ? 200 : 500, { ...result, infra })
+            } finally {
+              activeOperation = null
+            }
           },
         },
         {
@@ -874,26 +953,38 @@ export function apply(ctx: Context, config: Config): void {
           path: API + '/infra/apt-update',
           handler: async (req: any, res: any) => {
             if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method-not-allowed' })
+            if (activeOperation !== null || batch.running()) {
+              return json(res, 409, {
+                ok: false,
+                message: `当前正在执行「${activeOperation?.label ?? '批量更新'}」，请等待完成后再操作`,
+                activeOperation,
+              })
+            }
             const body = await readBody(req)
             const node = String(body?.node ?? 'local').trim()
             if (!node) {
               return json(res, 400, { ok: false, message: '需要合法的 node 标识' })
             }
-            pushLog({ at: Date.now(), kind: 'state', text: `[infra] 开始更新 ${node.toUpperCase()} 安全 APT 包` })
-            const result = await updateSafeApt(node)
-            pushLog({ at: Date.now(), kind: result.ok ? 'state' : 'log', text: `[infra] ${result.message}` })
-            appendHistory(
-              {
-                at: new Date().toISOString(),
-                kind: 'apt',
-                name: `${node}:safe-apt`,
-                ok: result.ok,
-                message: result.message,
-              },
-              config.historyLimit,
-            )
-            const infra = await scanInfra({ refresh: true })
-            json(res, result.ok ? 200 : 500, { ...result, infra })
+            activeOperation = { key: `apt:${node}`, label: `升级 ${node.toUpperCase()} 安全 APT 包`, startedAt: Date.now() }
+            try {
+              pushLog({ at: Date.now(), kind: 'state', text: `[infra] 开始更新 ${node.toUpperCase()} 安全 APT 包` })
+              const result = await updateSafeApt(node)
+              pushLog({ at: Date.now(), kind: result.ok ? 'state' : 'log', text: `[infra] ${result.message}` })
+              appendHistory(
+                {
+                  at: new Date().toISOString(),
+                  kind: 'apt',
+                  name: `${node}:safe-apt`,
+                  ok: result.ok,
+                  message: result.message,
+                },
+                config.historyLimit,
+              )
+              const infra = await scanInfra({ refresh: true })
+              json(res, result.ok ? 200 : 500, { ...result, infra })
+            } finally {
+              activeOperation = null
+            }
           },
         },
         {
@@ -901,26 +992,38 @@ export function apply(ctx: Context, config: Config): void {
           path: API + '/infra/toolchain-update',
           handler: async (req: any, res: any) => {
             if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method-not-allowed' })
+            if (activeOperation !== null || batch.running()) {
+              return json(res, 409, {
+                ok: false,
+                message: `当前正在执行「${activeOperation?.label ?? '批量更新'}」，请等待完成后再操作`,
+                activeOperation,
+              })
+            }
             const body = await readBody(req)
             const id = String(body?.id ?? '').trim()
             if (!id) {
               return json(res, 400, { ok: false, message: '需要工具链条目 id (如 uv / pnpm / litellm / obsidian / npm:catbus-cli)' })
             }
-            pushLog({ at: Date.now(), kind: 'state', text: `[infra] 开始更新本机工具 ${id}` })
-            const result = await updateToolchainItem(id)
-            pushLog({ at: Date.now(), kind: result.ok ? 'state' : 'log', text: `[infra] ${result.message}` })
-            appendHistory(
-              {
-                at: new Date().toISOString(),
-                kind: 'toolchain',
-                name: `toolchain:${id}`,
-                ok: result.ok,
-                message: result.message,
-              },
-              config.historyLimit,
-            )
-            const infra = await scanInfra({ refresh: true })
-            json(res, result.ok ? 200 : 500, { ...result, infra })
+            activeOperation = { key: `toolchain:${id}`, label: `升级本机工具 ${id}`, startedAt: Date.now() }
+            try {
+              pushLog({ at: Date.now(), kind: 'state', text: `[infra] 开始更新本机工具 ${id}` })
+              const result = await updateToolchainItem(id)
+              pushLog({ at: Date.now(), kind: result.ok ? 'state' : 'log', text: `[infra] ${result.message}` })
+              appendHistory(
+                {
+                  at: new Date().toISOString(),
+                  kind: 'toolchain',
+                  name: `toolchain:${id}`,
+                  ok: result.ok,
+                  message: result.message,
+                },
+                config.historyLimit,
+              )
+              const infra = await scanInfra({ refresh: true })
+              json(res, result.ok ? 200 : 500, { ...result, infra })
+            } finally {
+              activeOperation = null
+            }
           },
         },
         {
@@ -928,26 +1031,38 @@ export function apply(ctx: Context, config: Config): void {
           path: API + '/infra/venv-update',
           handler: async (req: any, res: any) => {
             if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method-not-allowed' })
+            if (activeOperation !== null || batch.running()) {
+              return json(res, 409, {
+                ok: false,
+                message: `当前正在执行「${activeOperation?.label ?? '批量更新'}」，请等待完成后再操作`,
+                activeOperation,
+              })
+            }
             const body = await readBody(req)
             const projectId = String(body?.projectId ?? '').trim()
             if (!projectId) {
               return json(res, 400, { ok: false, message: '需要项目虚拟环境 projectId（来自 infra-scan 自动发现的项目 id）' })
             }
-            pushLog({ at: Date.now(), kind: 'state', text: `[infra] 开始升级项目虚拟环境 ${projectId} 同主版本安全包` })
-            const result = await updateProjectVenv(projectId)
-            pushLog({ at: Date.now(), kind: result.ok ? 'state' : 'log', text: `[infra] ${result.message}` })
-            appendHistory(
-              {
-                at: new Date().toISOString(),
-                kind: 'venv',
-                name: `venv:${projectId}`,
-                ok: result.ok,
-                message: result.message,
-              },
-              config.historyLimit,
-            )
-            const infra = await scanInfra({ refresh: true })
-            json(res, result.ok ? 200 : 500, { ...result, infra })
+            activeOperation = { key: `venv:${projectId}`, label: `升级虚拟环境 ${projectId}`, startedAt: Date.now() }
+            try {
+              pushLog({ at: Date.now(), kind: 'state', text: `[infra] 开始升级项目虚拟环境 ${projectId} 同主版本安全包` })
+              const result = await updateProjectVenv(projectId)
+              pushLog({ at: Date.now(), kind: result.ok ? 'state' : 'log', text: `[infra] ${result.message}` })
+              appendHistory(
+                {
+                  at: new Date().toISOString(),
+                  kind: 'venv',
+                  name: `venv:${projectId}`,
+                  ok: result.ok,
+                  message: result.message,
+                },
+                config.historyLimit,
+              )
+              const infra = await scanInfra({ refresh: true })
+              json(res, result.ok ? 200 : 500, { ...result, infra })
+            } finally {
+              activeOperation = null
+            }
           },
         },
       ]

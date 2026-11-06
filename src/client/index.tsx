@@ -9,7 +9,7 @@
  *
  * 本体更新会重启 dsh.service，重启期间所有 fetch 都会失败——这不是错误，面板显示「服务重启中」并继续轮询。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import type {
   ApplyResult,
@@ -79,7 +79,7 @@ function Btn({
   title,
 }: {
   children: ReactNode
-  onClick: () => void
+  onClick?: () => void
   disabled?: boolean
   tone?: BtnTone
   size?: 'md' | 'lg' | 'sm'
@@ -575,6 +575,7 @@ function CoreSection({
   restartRun,
   confirming,
   launching,
+  anyBusy,
   onAskCore,
   onCancelCore,
   onLaunchCore,
@@ -584,6 +585,7 @@ function CoreSection({
   restartRun: any
   confirming: string | undefined
   launching: boolean
+  anyBusy: boolean
   onAskCore: (version: string) => void
   onCancelCore: () => void
   onLaunchCore: (version: string) => void
@@ -606,8 +608,13 @@ function CoreSection({
           {candidate === undefined ? (
             <Tag tone={C.ok}>已最新</Tag>
           ) : (
-            <Btn tone="primary" onClick={() => onAskCore(candidate.version)} title="备份 → 停服 → 安装 → 重启 → 健康检查 → 失败自动回滚">
-              更新到 {candidate.version}
+            <Btn
+              tone="primary"
+              disabled={anyBusy}
+              onClick={() => onAskCore(candidate.version)}
+              title="备份 → 停服 → 安装 → 重启 → 健康检查 → 失败自动回滚"
+            >
+              {launching || running ? '⏳ 更新本体中…' : anyBusy ? '⏸ 等待当前任务…' : `更新到 ${candidate.version}`}
             </Btn>
           )}
         </span>
@@ -859,6 +866,8 @@ function InfraSection({
   infra,
   loading,
   busyKey,
+  anyBusy,
+  completedKeys,
   activeTab,
   onlyActionable,
   onScan,
@@ -870,6 +879,8 @@ function InfraSection({
   infra: InfraSnapshot | undefined
   loading: boolean
   busyKey: string | undefined
+  anyBusy: boolean
+  completedKeys: Record<string, string>
   activeTab: ViewTab
   onlyActionable: boolean
   onScan: (refresh: boolean) => void
@@ -949,8 +960,8 @@ function InfraSection({
               : `${containersAll.length} 个 · ${infra.docker.updatableCount} 可更 · ${infra.docker.lockedCount} 保护锁`
           }
           action={
-            <Btn size="sm" onClick={() => onScan(true)} disabled={loading || busyKey !== undefined}>
-              {loading ? '探测中…' : '全量扫描运维组件'}
+            <Btn size="sm" onClick={() => onScan(true)} disabled={loading || anyBusy}>
+              {loading ? '⏳ 探测中…' : '全量扫描运维组件'}
             </Btn>
           }
         >
@@ -962,10 +973,12 @@ function InfraSection({
             containers.map((row, idx) => {
               const key = `docker:${row.node}:${row.name}`
               const isBusy = busyKey === key
+              const isCompleted = completedKeys[key] !== undefined
+              const effectiveStatus = isCompleted ? 'latest' : row.status
               const tone =
-                row.status === 'update' ? C.brand : row.status === 'locked' ? C.warn : row.status === 'latest' ? C.ok : C.err
+                effectiveStatus === 'update' ? C.brand : effectiveStatus === 'locked' ? C.warn : effectiveStatus === 'latest' ? C.ok : C.err
               const label =
-                row.status === 'update' ? '有新镜像' : row.status === 'locked' ? '已加锁保护' : row.status === 'latest' ? '已最新' : '探测异常'
+                effectiveStatus === 'update' ? '有新镜像' : effectiveStatus === 'locked' ? '已加锁保护' : effectiveStatus === 'latest' ? '已最新' : '探测异常'
               return (
                 <Row key={`${row.node}:${row.name}`} last={idx === containers.length - 1}>
                   <span style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 180, flex: '1 1 200px' }}>
@@ -974,19 +987,22 @@ function InfraSection({
                       <Name>{row.name}</Name>
                       <Meta>{row.image}</Meta>
                     </span>
-                    <Meta>{row.detail ?? row.statusText}</Meta>
+                    <Meta>{isCompleted ? '刚刚已完成拉取并重建，当前已是最新镜像' : (row.detail ?? row.statusText)}</Meta>
                   </span>
                   <Actions>
                     {isBusy ? (
-                      <span style={{ fontSize: 12, color: C.brand }}>拉取重建中…</span>
-                    ) : row.status === 'update' ? (
+                      <Btn size="sm" disabled title="当前容器正在拉取镜像并重建中，请稍候…">
+                        ⏳ 拉取重建中…
+                      </Btn>
+                    ) : effectiveStatus === 'update' ? (
                       <Btn
                         tone="primary"
                         size="sm"
-                        disabled={busyKey !== undefined}
+                        disabled={anyBusy}
+                        title={anyBusy ? '当前有其他更新任务正在执行，请等待完成后再操作' : '拉取最新镜像并按原编排安全重建容器'}
                         onClick={() => onUpdateDocker(row.node, row.name)}
                       >
-                        拉取并重建
+                        {anyBusy ? '⏸ 等待当前任务…' : '拉取并重建'}
                       </Btn>
                     ) : (
                       <Tag tone={tone}>{label}</Tag>
@@ -1009,17 +1025,30 @@ function InfraSection({
           }
           action={
             <span style={{ display: 'flex', gap: 6 }}>
-              {updatableAptNodes.map((n) => (
-                <Btn
-                  key={n.node}
-                  size="sm"
-                  tone="primary"
-                  disabled={busyKey !== undefined}
-                  onClick={() => onUpdateApt(n.node)}
-                >
-                  {busyKey === `apt:${n.node}` ? '更新中…' : `更新 ${n.label} (${n.count})`}
-                </Btn>
-              ))}
+              {updatableAptNodes.map((n) => {
+                const aptKey = `apt:${n.node}`
+                const isAptBusy = busyKey === aptKey
+                const isAptDone = completedKeys[aptKey] !== undefined
+                if (isAptDone) {
+                  return (
+                    <Tag key={n.node} tone={C.ok}>
+                      ✓ {n.label} 已升级
+                    </Tag>
+                  )
+                }
+                return (
+                  <Btn
+                    key={n.node}
+                    size="sm"
+                    tone="primary"
+                    disabled={anyBusy}
+                    title={isAptBusy ? `${n.label} 正在执行 APT 升级…` : anyBusy ? '当前有其他更新任务正在执行，请稍候' : `升级 ${n.label} 安全 APT 包`}
+                    onClick={() => onUpdateApt(n.node)}
+                  >
+                    {isAptBusy ? `⏳ 更新 ${n.label} 中…` : anyBusy ? `⏸ 等待任务 (${n.label})` : `更新 ${n.label} (${n.count})`}
+                  </Btn>
+                )
+              })}
             </span>
           }
         >
@@ -1068,11 +1097,13 @@ function InfraSection({
           {infra?.toolchain === undefined ? (
             <Empty>随运维组件扫描一并加载 uv、pnpm、litellm、全局 CLI 与 Obsidian 桌面版状态。</Empty>
           ) : toolchainItems.length === 0 ? (
-            <Empty>{onlyActionable ? '所有 10 项本机工具链与 CLI 均已是最新。' : '未发现已登记的工具链条目。'}</Empty>
+            <Empty>{onlyActionable ? '所有本机工具链与 CLI 均已是最新。' : '未发现已登记的工具链条目。'}</Empty>
           ) : (
             toolchainItems.map((item, idx) => {
               const key = `toolchain:${item.id}`
               const isBusy = busyKey === key
+              const isCompleted = completedKeys[key] !== undefined
+              const effectiveStatus = isCompleted ? 'latest' : item.status
               return (
                 <Row key={item.id} last={idx === toolchainItems.length - 1}>
                   <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 180, flex: '1 1 200px' }}>
@@ -1080,22 +1111,25 @@ function InfraSection({
                       <Tag tone={C.dim}>{item.category}</Tag>
                       <Name>{item.name}</Name>
                       <Meta>
-                        {item.installed} → {item.latest ?? '—'}
+                        {isCompleted ? `${item.latest ?? item.installed} · 已是最新` : `${item.installed} → ${item.latest ?? '—'}`}
                       </Meta>
                     </span>
                     {item.detail ? <Meta>{item.detail}</Meta> : null}
                   </span>
                   <Actions>
                     {isBusy ? (
-                      <span style={{ fontSize: 12, color: C.brand }}>升级中…</span>
-                    ) : item.status === 'update' ? (
+                      <Btn size="sm" disabled title="当前工具正在升级中，请稍候…">
+                        ⏳ 正在升级…
+                      </Btn>
+                    ) : effectiveStatus === 'update' ? (
                       <Btn
                         tone="primary"
                         size="sm"
-                        disabled={busyKey !== undefined}
+                        disabled={anyBusy}
+                        title={anyBusy ? '当前有其他更新任务正在执行，请等待完成后再操作' : `一键升级 ${item.name}`}
                         onClick={() => onUpdateToolchain(item.id, item.name)}
                       >
-                        一键升级
+                        {anyBusy ? '⏸ 等待当前任务…' : '一键升级'}
                       </Btn>
                     ) : (
                       <Tag tone={C.ok}>已最新</Tag>
@@ -1125,6 +1159,8 @@ function InfraSection({
             venvProjects.map((proj, idx) => {
               const key = `venv:${proj.id}`
               const isBusy = busyKey === key
+              const isCompleted = completedKeys[key] !== undefined
+              const effectiveSafeCount = isCompleted ? 0 : proj.safeUpdatableCount
               return (
                 <Row key={proj.id} last={idx === venvProjects.length - 1}>
                   <span style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 200, flex: '1 1 240px' }}>
@@ -1138,9 +1174,9 @@ function InfraSection({
                     ) : (
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 2 }}>
                         {proj.packages.map((p) => (
-                          <Tag key={p.name} tone={p.safe ? C.brand : C.warn}>
+                          <Tag key={p.name} tone={p.safe ? (isCompleted ? C.ok : C.brand) : C.warn}>
                             {p.name} {p.installed}→{p.latest}
-                            {p.safe ? '' : ' 🔒锁定'}
+                            {p.safe ? (isCompleted ? ' ✓已更' : '') : ' 🔒锁定'}
                           </Tag>
                         ))}
                       </div>
@@ -1148,15 +1184,18 @@ function InfraSection({
                   </span>
                   <Actions>
                     {isBusy ? (
-                      <span style={{ fontSize: 12, color: C.brand }}>升级中…</span>
-                    ) : proj.safeUpdatableCount > 0 ? (
+                      <Btn size="sm" disabled title="当前项目虚拟环境正在升级中，请稍候…">
+                        ⏳ 正在升级…
+                      </Btn>
+                    ) : effectiveSafeCount > 0 ? (
                       <Btn
                         tone="primary"
                         size="sm"
-                        disabled={busyKey !== undefined}
+                        disabled={anyBusy}
+                        title={anyBusy ? '当前有其他更新任务正在执行，请等待完成后再操作' : `升级 ${proj.project} 同主版本安全包`}
                         onClick={() => onUpdateVenv(proj.id, proj.project)}
                       >
-                        升级安全包 ({proj.safeUpdatableCount})
+                        {anyBusy ? '⏸ 等待当前任务…' : `升级安全包 (${effectiveSafeCount})`}
                       </Btn>
                     ) : (
                       <Tag tone={C.ok}>安全包已最新</Tag>
@@ -1194,8 +1233,10 @@ export function PanelPage() {
   const [infra, setInfra] = useState<InfraSnapshot | undefined>(undefined)
   const [infraLoading, setInfraLoading] = useState(false)
   const [infraBusy, setInfraBusy] = useState<string | undefined>(undefined)
+  const [completedKeys, setCompletedKeys] = useState<Record<string, string>>({})
   const [activeTab, setActiveTab] = useState<ViewTab>('overview')
   const [onlyActionable, setOnlyActionable] = useState(false)
+  const actionMutexRef = useRef(false)
 
   const load = useCallback(async (options: { refresh?: boolean; deep?: boolean; mode?: 'local' } = {}) => {
     const params: string[] = []
@@ -1209,6 +1250,14 @@ export function PanelPage() {
         setSnapshot(data)
         setRefreshing(data.refreshing === true)
         setError(undefined)
+        if (options.refresh === true) setCompletedKeys((prev) => {
+          // 显式全量刷新后，若后端快照已 반영，清理对应插件锁
+          const next = { ...prev }
+          for (const k of Object.keys(next)) {
+            if (k.startsWith('bundle:')) delete next[k]
+          }
+          return next
+        })
         if (restarting) setRestarting(false)
       } else {
         setError('快照为空：宿主路由未就绪')
@@ -1235,6 +1284,15 @@ export function PanelPage() {
       const data = await apiJson('/infra' + (refresh ? '?refresh=1' : ''))
       if (data?.ok === true && data.infra !== undefined) {
         setInfra(data.infra as InfraSnapshot)
+        if (refresh) {
+          setCompletedKeys((prev) => {
+            const next = { ...prev }
+            for (const k of Object.keys(next)) {
+              if (!k.startsWith('bundle:')) delete next[k]
+            }
+            return next
+          })
+        }
       }
     } catch {
       /* 忽略首屏缓存未就绪 */
@@ -1245,7 +1303,10 @@ export function PanelPage() {
 
   const handleUpdateDocker = useCallback(
     async (node: string, name: string) => {
-      setInfraBusy(`docker:${node}:${name}`)
+      if (actionMutexRef.current) return
+      actionMutexRef.current = true
+      const key = `docker:${node}:${name}`
+      setInfraBusy(key)
       setOutcome(undefined)
       try {
         const data = await apiJson('/infra/docker-update', {
@@ -1253,6 +1314,9 @@ export function PanelPage() {
           body: JSON.stringify({ node, name }),
         })
         if (data?.infra !== undefined) setInfra(data.infra as InfraSnapshot)
+        if (data?.ok === true) {
+          setCompletedKeys((prev) => ({ ...prev, [key]: 'latest' }))
+        }
         setOutcome({
           ok: data?.ok === true,
           title: `容器更新 ${node}:${name}`,
@@ -1262,6 +1326,7 @@ export function PanelPage() {
       } catch (caught) {
         setOutcome({ ok: false, title: `容器更新 ${node}:${name}`, detail: String(caught) })
       } finally {
+        actionMutexRef.current = false
         setInfraBusy(undefined)
         await loadHistory()
       }
@@ -1271,7 +1336,10 @@ export function PanelPage() {
 
   const handleUpdateApt = useCallback(
     async (node: string) => {
-      setInfraBusy(`apt:${node}`)
+      if (actionMutexRef.current) return
+      actionMutexRef.current = true
+      const key = `apt:${node}`
+      setInfraBusy(key)
       setOutcome(undefined)
       try {
         const data = await apiJson('/infra/apt-update', {
@@ -1279,6 +1347,9 @@ export function PanelPage() {
           body: JSON.stringify({ node }),
         })
         if (data?.infra !== undefined) setInfra(data.infra as InfraSnapshot)
+        if (data?.ok === true) {
+          setCompletedKeys((prev) => ({ ...prev, [key]: 'latest' }))
+        }
         setOutcome({
           ok: data?.ok === true,
           title: `APT 安全包更新 (${node.toUpperCase()})`,
@@ -1288,6 +1359,7 @@ export function PanelPage() {
       } catch (caught) {
         setOutcome({ ok: false, title: `APT 安全包更新 (${node.toUpperCase()})`, detail: String(caught) })
       } finally {
+        actionMutexRef.current = false
         setInfraBusy(undefined)
         await loadHistory()
       }
@@ -1297,7 +1369,10 @@ export function PanelPage() {
 
   const handleUpdateToolchain = useCallback(
     async (id: string, name: string) => {
-      setInfraBusy(`toolchain:${id}`)
+      if (actionMutexRef.current) return
+      actionMutexRef.current = true
+      const key = `toolchain:${id}`
+      setInfraBusy(key)
       setOutcome(undefined)
       try {
         const data = await apiJson('/infra/toolchain-update', {
@@ -1305,6 +1380,9 @@ export function PanelPage() {
           body: JSON.stringify({ id }),
         })
         if (data?.infra !== undefined) setInfra(data.infra as InfraSnapshot)
+        if (data?.ok === true) {
+          setCompletedKeys((prev) => ({ ...prev, [key]: 'latest' }))
+        }
         setOutcome({
           ok: data?.ok === true,
           title: `工具链升级 (${name})`,
@@ -1314,6 +1392,7 @@ export function PanelPage() {
       } catch (caught) {
         setOutcome({ ok: false, title: `工具链升级 (${name})`, detail: String(caught) })
       } finally {
+        actionMutexRef.current = false
         setInfraBusy(undefined)
         await loadHistory()
       }
@@ -1323,7 +1402,10 @@ export function PanelPage() {
 
   const handleUpdateVenv = useCallback(
     async (projectId: string, projectName: string) => {
-      setInfraBusy(`venv:${projectId}`)
+      if (actionMutexRef.current) return
+      actionMutexRef.current = true
+      const key = `venv:${projectId}`
+      setInfraBusy(key)
       setOutcome(undefined)
       try {
         const data = await apiJson('/infra/venv-update', {
@@ -1331,6 +1413,9 @@ export function PanelPage() {
           body: JSON.stringify({ projectId }),
         })
         if (data?.infra !== undefined) setInfra(data.infra as InfraSnapshot)
+        if (data?.ok === true) {
+          setCompletedKeys((prev) => ({ ...prev, [key]: 'latest' }))
+        }
         setOutcome({
           ok: data?.ok === true,
           title: `虚拟环境升级 (${projectName})`,
@@ -1340,6 +1425,7 @@ export function PanelPage() {
       } catch (caught) {
         setOutcome({ ok: false, title: `虚拟环境升级 (${projectName})`, detail: String(caught) })
       } finally {
+        actionMutexRef.current = false
         setInfraBusy(undefined)
         await loadHistory()
       }
@@ -1464,10 +1550,15 @@ export function PanelPage() {
 
   const apply = useCallback(
     async (target: string, version: string) => {
+      if (actionMutexRef.current) return
+      actionMutexRef.current = true
       setBusy(target)
       setOutcome(undefined)
       try {
         const data = (await apiJson('/update', { method: 'POST', body: JSON.stringify({ name: target, version }) })) as ApplyResult
+        if (data.ok === true) {
+          setCompletedKeys((prev) => ({ ...prev, [`bundle:${target}`]: data.to ?? version }))
+        }
         setOutcome({
           ok: data.ok,
           title: target + ' ' + (data.from ?? '') + ' → ' + (data.to ?? version),
@@ -1477,6 +1568,7 @@ export function PanelPage() {
       } catch (caught) {
         setOutcome({ ok: false, title: target, detail: String(caught) })
       } finally {
+        actionMutexRef.current = false
         setBusy(undefined)
         await load()
         await loadHistory()
@@ -1487,6 +1579,8 @@ export function PanelPage() {
 
   const convert = useCallback(
     async (row: UpdateRow, confirmOverwrite = false) => {
+      if (actionMutexRef.current) return
+      actionMutexRef.current = true
       setBusy(row.name)
       setOutcome(undefined)
       setConfirmConvert(undefined)
@@ -1498,6 +1592,13 @@ export function PanelPage() {
           ...(confirmOverwrite ? { confirmOverwrite: true } : {}),
         })
         const data = (await apiJson('/convert', { method: 'POST', body })) as ConvertResult
+        if (data.ok === true) {
+          setCompletedKeys((prev) => ({
+            ...prev,
+            [`bundle:${row.name}`]: data.to ?? row.upstream?.version ?? 'latest',
+            [`convert:${row.name}`]: data.to ?? row.upstream?.version ?? 'latest',
+          }))
+        }
         setOutcome({
           ok: data.ok,
           title: row.name + ' 转为线上 ' + (data.to ?? ''),
@@ -1507,6 +1608,7 @@ export function PanelPage() {
       } catch (caught) {
         setOutcome({ ok: false, title: row.name + ' 转为线上', detail: String(caught) })
       } finally {
+        actionMutexRef.current = false
         setBusy(undefined)
         await load()
         await loadHistory()
@@ -1517,6 +1619,8 @@ export function PanelPage() {
 
   const updateAll = useCallback(
     async (channel: 'stable' | 'preview') => {
+      if (actionMutexRef.current) return
+      actionMutexRef.current = true
       setNotice(undefined)
       setOutcome(undefined)
       try {
@@ -1529,6 +1633,8 @@ export function PanelPage() {
         }
       } catch (caught) {
         setNotice(String(caught))
+      } finally {
+        actionMutexRef.current = false
       }
     },
     [],
@@ -1608,27 +1714,71 @@ export function PanelPage() {
   )
   const coreRows = useMemo(() => (snapshot === undefined ? [] : (snapshot.coreProvided ?? [])), [snapshot])
   const injectedRows = useMemo(() => (snapshot === undefined ? [] : snapshot.injected), [snapshot])
-  const stableUpdates = registryRows.filter((row) => row.status === 'update').length
-  const previewUpdates = registryRows.filter((row) => row.status === 'update' || row.status === 'preview-only').length
+  const stableUpdates = registryRows.filter(
+    (row) => row.status === 'update' && completedKeys[`bundle:${row.name}`] === undefined,
+  ).length
+  const previewUpdates = registryRows.filter(
+    (row) =>
+      (row.status === 'update' || row.status === 'preview-only') &&
+      completedKeys[`bundle:${row.name}`] === undefined,
+  ).length
   // 面板内的提醒口径与侧栏角标一致（同一个纯函数），但直接用快照算，不再多一轮请求。
   const reminder = useMemo(() => (snapshot === undefined ? undefined : reminderFrom(snapshot)), [snapshot])
   const pendingRestart = snapshot?.pendingRestart ?? []
   const batchItemRunning = batch?.running === true ? batch.current : undefined
+  const anyBusy =
+    busy !== undefined ||
+    infraBusy !== undefined ||
+    batchRunning ||
+    coreRunning ||
+    launching ||
+    restarting
   const localTotal = localRows.length + injectedRows.length
 
-  const dockerUpdatable = infra?.docker.updatableCount ?? 0
+  const dockerUpdatable =
+    infra?.docker.containers.filter(
+      (c) => c.status === 'update' && completedKeys[`docker:${c.node}:${c.name}`] === undefined,
+    ).length ?? 0
   const dockerLocked = infra?.docker.lockedCount ?? 0
   const dockerTotal = infra?.docker.containers.length ?? 0
-  const aptSafeCount = infra?.apt.safeUpdatableCount ?? 0
+  const aptSafeCount =
+    infra === undefined
+      ? 0
+      : (infra.apt.nodes ?? [
+          { node: 'local', safeUpdatableCount: infra.apt.vm100.filter((p) => !p.locked).length },
+          { node: 'pve', safeUpdatableCount: infra.apt.pve.filter((p) => !p.locked).length },
+        ]).reduce(
+          (sum, n) => sum + (completedKeys[`apt:${n.node}`] !== undefined ? 0 : n.safeUpdatableCount),
+          0,
+        )
   const aptLockedCount = infra?.apt.lockedCount ?? 0
-  const toolchainUpdatable = infra?.toolchain?.updatableCount ?? 0
+  const toolchainUpdatable =
+    infra?.toolchain?.items.filter(
+      (t) => t.status === 'update' && completedKeys[`toolchain:${t.id}`] === undefined,
+    ).length ?? 0
   const toolchainTotal = infra?.toolchain?.items.length ?? 0
-  const venvSafeCount = infra?.venvs?.totalSafeUpdatable ?? 0
+  const venvSafeCount =
+    infra?.venvs?.projects.reduce(
+      (sum, v) => sum + (completedKeys[`venv:${v.id}`] !== undefined ? 0 : v.safeUpdatableCount),
+      0,
+    ) ?? 0
   const venvTotal = infra?.venvs?.projects.length ?? 0
 
-  const filteredRegistryRows = onlyActionable ? registryRows.filter((r) => r.status === 'update' || r.status === 'preview-only') : registryRows
+  const filteredRegistryRows = onlyActionable
+    ? registryRows.filter(
+        (r) =>
+          ((r.status === 'update' || r.status === 'preview-only') &&
+            completedKeys[`bundle:${r.name}`] === undefined) ||
+          busy === r.name ||
+          batchItemRunning === r.name,
+      )
+    : registryRows
   const filteredLocalRows = onlyActionable
-    ? [...localRows, ...injectedRows].filter((r) => r.upstream?.convertible === true)
+    ? [...localRows, ...injectedRows].filter(
+        (r) =>
+          (r.upstream?.convertible === true && completedKeys[`convert:${r.name}`] === undefined) ||
+          busy === r.name,
+      )
     : [...localRows, ...injectedRows]
 
   const showDsh = activeTab === 'overview' || activeTab === 'dsh'
@@ -1720,23 +1870,23 @@ export function PanelPage() {
                 void load({ refresh: true })
                 void loadInfra(true)
               }}
-              disabled={scanning || infraLoading}
+              disabled={scanning || infraLoading || anyBusy}
               title="同时刷新 DSH 上游版本与跨节点 Docker/APT/工具链/.venv 状态"
             >
-              {scanning || infraLoading ? '全栈扫描中…' : '🔄 全栈刷新'}
+              {scanning || infraLoading ? '⏳ 全栈扫描中…' : '🔄 全栈刷新'}
             </Btn>
             <Btn
               tone="primary"
               size="md"
-              disabled={scanning || batchRunning || stableUpdates === 0}
+              disabled={scanning || anyBusy || stableUpdates === 0}
               onClick={() => void updateAll('stable')}
               title="串行更新所有有正式版更新的 DSH 套件，不重启服务"
             >
-              {batchRunning ? '批量进行中…' : '更新插件（' + stableUpdates + '）'}
+              {batchRunning ? '⏳ 批量进行中…' : anyBusy ? '⏸ 等待当前任务…' : '更新插件（' + stableUpdates + '）'}
             </Btn>
             {previewUpdates > stableUpdates ? (
-              <Btn size="sm" disabled={scanning || batchRunning} onClick={() => void updateAll('preview')} title="把仅预览版更新的套件也算进来">
-                含预览（{previewUpdates}）
+              <Btn size="sm" disabled={scanning || anyBusy} onClick={() => void updateAll('preview')} title="把仅预览版更新的套件也算进来">
+                {anyBusy ? '⏸ 等待…' : `含预览（${previewUpdates}）`}
               </Btn>
             ) : null}
           </div>
@@ -1956,8 +2106,12 @@ export function PanelPage() {
             {reminder.core.channel === 'preview' ? '预览通道' : '正式通道'} · 更新会重启服务（备份 → 停服 → 安装 → 健康检查 → 失败自动回滚）
           </Meta>
           <Actions>
-            <Btn tone={reminder.core.level === 'major' ? 'danger' : 'primary'} onClick={() => setConfirming(reminder.core.target ?? '')}>
-              更新本体到 {reminder.core.target}
+            <Btn
+              tone={reminder.core.level === 'major' ? 'danger' : 'primary'}
+              disabled={anyBusy}
+              onClick={() => setConfirming(reminder.core.target ?? '')}
+            >
+              {anyBusy ? '⏸ 等待当前任务…' : `更新本体到 ${reminder.core.target}`}
             </Btn>
           </Actions>
         </div>
@@ -1984,7 +2138,7 @@ export function PanelPage() {
             <RestartBanner
               items={pendingRestart}
               restarting={restarting}
-              busy={busy !== undefined}
+              busy={anyBusy}
               allow={true}
               onRestart={() => void restartService()}
               onLater={() => void dismissRestart()}
@@ -2065,6 +2219,7 @@ export function PanelPage() {
                   restartRun={restartRun}
                   confirming={confirming}
                   launching={launching}
+                  anyBusy={anyBusy}
                   onAskCore={(version) => setConfirming(version)}
                   onCancelCore={() => setConfirming(undefined)}
                   onLaunchCore={(version) => void launchCore(version)}
@@ -2087,10 +2242,17 @@ export function PanelPage() {
                     <Empty>{onlyActionable ? '所有线上 registry 套件均已是最新。' : '没有可从 registry 查询的插件。'}</Empty>
                   ) : (
                     filteredRegistryRows.map((row, index) => {
-                      const stableTarget = row.status === 'update' ? row.stable?.version : undefined
+                      const isCompleted = completedKeys[`bundle:${row.name}`]
+                      const effectiveRow: UpdateRow =
+                        isCompleted !== undefined
+                          ? { ...row, installed: isCompleted, status: 'latest' }
+                          : row
+                      const stableTarget = effectiveRow.status === 'update' ? effectiveRow.stable?.version : undefined
                       const previewTarget =
-                        row.preview !== undefined && row.preview.version !== row.stable?.version && row.preview.version !== row.installed
-                          ? row.preview.version
+                        effectiveRow.preview !== undefined &&
+                        effectiveRow.preview.version !== effectiveRow.stable?.version &&
+                        effectiveRow.preview.version !== effectiveRow.installed
+                          ? effectiveRow.preview.version
                           : undefined
                       const isBusy = busy === row.name || batchItemRunning === row.name
                       return (
@@ -2098,28 +2260,40 @@ export function PanelPage() {
                           <span style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 180, flex: '1 1 200px' }}>
                             <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                               <Name title={row.source ?? row.name}>{row.name}</Name>
-                              <Tag tone={sourceTone(row.sourceKind)}>{SOURCE_TEXT[row.sourceKind] ?? row.sourceKind}</Tag>
+                              <Tag tone={sourceTone(effectiveRow.sourceKind)}>{SOURCE_TEXT[effectiveRow.sourceKind] ?? effectiveRow.sourceKind}</Tag>
                             </span>
-                            <Meta title={row.detail}>{rowLine(row)}</Meta>
+                            <Meta title={row.detail}>{rowLine(effectiveRow)}</Meta>
                           </span>
                           <Actions>
                             {isBusy ? (
-                              <span style={{ fontSize: 12, color: C.brand }}>更新中…</span>
+                              <Btn size="sm" disabled title="当前插件正在安装并热重载中，请稍候…">
+                                ⏳ 正在更新…
+                              </Btn>
                             ) : (
                               <>
                                 {stableTarget === undefined ? null : (
-                                  <Btn tone="primary" onClick={() => void apply(row.name, stableTarget)} title={'热更新到正式版 ' + stableTarget}>
-                                    更新到 {stableTarget}
+                                  <Btn
+                                    tone="primary"
+                                    disabled={anyBusy}
+                                    onClick={() => void apply(row.name, stableTarget)}
+                                    title={anyBusy ? '当前有其他更新任务正在执行，请等待完成后再操作' : '热更新到正式版 ' + stableTarget}
+                                  >
+                                    {anyBusy ? '⏸ 等待当前任务…' : '更新到 ' + stableTarget}
                                   </Btn>
                                 )}
                                 {previewTarget === undefined ? null : (
-                                  <Btn size="sm" onClick={() => void apply(row.name, previewTarget)} title={'热更新到预览版 ' + previewTarget}>
-                                    预览 {previewTarget}
+                                  <Btn
+                                    size="sm"
+                                    disabled={anyBusy}
+                                    onClick={() => void apply(row.name, previewTarget)}
+                                    title={anyBusy ? '当前有其他更新任务正在执行，请等待完成后再操作' : '热更新到预览版 ' + previewTarget}
+                                  >
+                                    {anyBusy ? '⏸ 等待…' : '预览 ' + previewTarget}
                                   </Btn>
                                 )}
                                 {stableTarget === undefined && previewTarget === undefined ? (
-                                  <Tag tone={row.status === 'local-ahead' ? C.ok : row.status === 'unknown' ? C.idle : C.ok}>
-                                    {row.status === 'local-ahead' ? '本地领先' : row.status === 'unknown' ? '上游未知' : '已最新'}
+                                  <Tag tone={effectiveRow.status === 'local-ahead' ? C.ok : effectiveRow.status === 'unknown' ? C.idle : C.ok}>
+                                    {effectiveRow.status === 'local-ahead' ? '本地领先' : effectiveRow.status === 'unknown' ? '上游未知' : '已最新'}
                                   </Tag>
                                 ) : null}
                               </>
@@ -2142,7 +2316,8 @@ export function PanelPage() {
                       const upstream = row.upstream
                       const delta = row.localDelta
                       const isBusy = busy === row.name
-                      const canConvert = upstream?.convertible === true && upstream.version !== undefined
+                      const isConverted = completedKeys[`convert:${row.name}`]
+                      const canConvert = isConverted === undefined && upstream?.convertible === true && upstream.version !== undefined
                       const clean = delta?.status === 'identical'
                       const confirmingThis = confirmConvert === row.name
                       const deltaText =
@@ -2166,34 +2341,52 @@ export function PanelPage() {
                           <span style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 180, flex: '1 1 200px' }}>
                             <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                               <Name title={row.source ?? row.name}>{row.name}</Name>
-                              <Tag tone={sourceTone(row.sourceKind)}>{SOURCE_TEXT[row.sourceKind] ?? row.sourceKind}</Tag>
-                              <Meta>{row.installed ?? '—'}</Meta>
+                              <Tag tone={isConverted ? C.ok : sourceTone(row.sourceKind)}>
+                                {isConverted ? '已转线上' : (SOURCE_TEXT[row.sourceKind] ?? row.sourceKind)}
+                              </Tag>
+                              <Meta>{isConverted ?? row.installed ?? '—'}</Meta>
                             </span>
                             <Meta title={row.detail}>
-                              {canConvert
-                                ? '上游有 ' + upstream.version + (deltaText === '' ? '' : ' · ' + deltaText)
-                                : (upstream?.reason ?? row.detail ?? '本地源，上游无同名包')}
+                              {isConverted
+                                ? `已成功切换为线上版本 ${isConverted}`
+                                : canConvert
+                                  ? '上游有 ' + upstream.version + (deltaText === '' ? '' : ' · ' + deltaText)
+                                  : (upstream?.reason ?? row.detail ?? '本地源，上游无同名包')}
                             </Meta>
                           </span>
                           <Actions>
                             {isBusy ? (
-                              <span style={{ fontSize: 12, color: C.brand }}>转换中…</span>
+                              <Btn size="sm" disabled title="当前插件正在转换为线上版本，请稍候…">
+                                ⏳ 正在转换…
+                              </Btn>
+                            ) : isConverted !== undefined ? (
+                              <Tag tone={C.ok}>已最新</Tag>
                             ) : canConvert ? (
                               clean ? (
                                 <Btn
                                   tone="primary"
+                                  disabled={anyBusy}
                                   onClick={() => void convert(row)}
-                                  title={'与上游 ' + upstream.version + ' 逐文件一致；先摘掉本地来源再从上游装，失败自动恢复'}
+                                  title={
+                                    anyBusy
+                                      ? '当前有其他更新任务正在执行，请等待完成后再操作'
+                                      : '与上游 ' + upstream.version + ' 逐文件一致；先摘掉本地来源再从上游装，失败自动恢复'
+                                  }
                                 >
-                                  转为线上 {upstream.version}
+                                  {anyBusy ? '⏸ 等待当前任务…' : '转为线上 ' + upstream.version}
                                 </Btn>
                               ) : (
                                 <Btn
                                   tone="danger"
+                                  disabled={anyBusy}
                                   onClick={() => setConfirmConvert(confirmingThis ? undefined : row.name)}
-                                  title={'本地与上游 ' + upstream.version + ' 不一致，点开确认后再转'}
+                                  title={
+                                    anyBusy
+                                      ? '当前有其他更新任务正在执行，请等待完成后再操作'
+                                      : '本地与上游 ' + upstream.version + ' 不一致，点开确认后再转'
+                                  }
                                 >
-                                  转为线上（本地有改动）
+                                  {anyBusy ? '⏸ 等待当前任务…' : '转为线上（本地有改动）'}
                                 </Btn>
                               )
                             ) : (
@@ -2223,10 +2416,10 @@ export function PanelPage() {
                                 </span>
                               )}
                               <span style={{ display: 'flex', gap: 8 }}>
-                                <Btn tone="danger" onClick={() => void convert(row, true)}>
-                                  确认覆盖并转换
+                                <Btn tone="danger" disabled={anyBusy} onClick={() => void convert(row, true)}>
+                                  {isBusy ? '⏳ 转换中…' : '确认覆盖并转换'}
                                 </Btn>
-                                <Btn tone="ghost" onClick={() => setConfirmConvert(undefined)}>
+                                <Btn tone="ghost" disabled={anyBusy} onClick={() => setConfirmConvert(undefined)}>
                                   取消
                                 </Btn>
                               </span>
@@ -2246,6 +2439,8 @@ export function PanelPage() {
               infra={infra}
               loading={infraLoading}
               busyKey={infraBusy}
+              anyBusy={anyBusy}
+              completedKeys={completedKeys}
               activeTab={activeTab}
               onlyActionable={onlyActionable}
               onScan={(refresh) => void loadInfra(refresh)}
