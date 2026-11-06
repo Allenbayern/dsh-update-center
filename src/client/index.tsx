@@ -2140,18 +2140,23 @@ export function PanelPage() {
     activeTab === 'systemd'
   const showHistory = activeTab === 'overview' || activeTab === 'history'
 
-  const tabs: { id: ViewTab; label: string; badge?: number; tone?: string }[] = [
+  const tabRowPrimary: { id: ViewTab; label: string; badge?: number; tone?: string }[] = [
     { id: 'overview', label: '🌐 全景工作台' },
     { id: 'dsh', label: '🧩 DSH 本体与插件', badge: stableUpdates + pendingRestart.length, tone: stableUpdates > 0 ? C.brand : C.warn },
     { id: 'docker', label: `🐳 容器 (${dockerTotal})`, badge: dockerUpdatable, tone: C.brand },
     { id: 'apt', label: '🛡️ 系统 APT', badge: aptSafeCount, tone: C.brand },
     { id: 'toolchain', label: `🧰 工具链 (${toolchainTotal})`, badge: toolchainUpdatable, tone: C.brand },
+  ]
+
+  const tabRowSecondary: { id: ViewTab; label: string; badge?: number; tone?: string }[] = [
     { id: 'venv', label: `🐍 Python .venv (${venvTotal})`, badge: venvSafeCount, tone: C.brand },
     { id: 'git', label: `🌿 Git 与技能 (${gitTotalCount})`, badge: gitUpdatableCount, tone: C.brand },
     { id: 'cleanup', label: '🧹 缓存瘦身 GC', badge: cleanupActionableCount, tone: C.brand },
     { id: 'systemd', label: '🩺 Systemd 巡检', badge: systemdFailedCount, tone: C.err },
     { id: 'history', label: `📜 日志与历史 (${history.length})` },
   ]
+
+  const tabs = [...tabRowPrimary, ...tabRowSecondary]
 
   const totalActionable =
     stableUpdates +
@@ -2253,54 +2258,77 @@ export function PanelPage() {
           </div>
         </header>
 
-        {/* 分区快捷切换胶囊条 */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          {tabs.map((tab) => {
-            const isAct = activeTab === tab.id
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setActiveTab(tab.id)}
+        {/* 分区快捷切换胶囊条（分两层展示：上层系统与容器核心，下层工程与系统维护） */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {[
+            { tag: '核心层', items: tabRowPrimary },
+            { tag: '维护层', items: tabRowSecondary },
+          ].map((rowGroup) => (
+            <div key={rowGroup.tag} style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <span
                 style={{
-                  appearance: 'none',
-                  WebkitAppearance: 'none',
-                  height: 30,
-                  padding: '0 13px',
-                  borderRadius: 999,
-                  border: '1px solid ' + (isAct ? '#2563eb' : C.line2),
-                  backgroundColor: isAct ? '#2563eb' : C.layer2,
-                  backgroundImage: isAct ? 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)' : 'none',
-                  color: isAct ? '#ffffff' : C.text,
-                  fontSize: 12,
-                  fontWeight: isAct ? 650 : 500,
-                  cursor: 'pointer',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  boxShadow: isAct ? '0 2px 8px rgba(37,99,235,.28)' : 'none',
-                  transition: 'all .15s ease',
+                  fontSize: 10.5,
+                  fontWeight: 700,
+                  color: C.dim,
+                  padding: '2px 7px',
+                  borderRadius: 6,
+                  background: C.layer2,
+                  border: '1px solid ' + C.line,
+                  minWidth: 48,
+                  textAlign: 'center',
+                  flexShrink: 0,
                 }}
               >
-                <span style={{ color: isAct ? '#ffffff' : C.text }}>{tab.label}</span>
-                {tab.badge !== undefined && tab.badge > 0 ? (
-                  <span
+                {rowGroup.tag}
+              </span>
+              {rowGroup.items.map((tab) => {
+                const isAct = activeTab === tab.id
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setActiveTab(tab.id)}
                     style={{
-                      padding: '0 6px',
+                      appearance: 'none',
+                      WebkitAppearance: 'none',
+                      height: 28,
+                      padding: '0 12px',
                       borderRadius: 999,
-                      fontSize: 10.5,
-                      lineHeight: '16px',
-                      fontWeight: 700,
-                      background: isAct ? '#ffffff' : (tab.tone ?? C.brand),
-                      color: isAct ? '#1d4ed8' : '#ffffff',
+                      border: '1px solid ' + (isAct ? '#2563eb' : C.line2),
+                      backgroundColor: isAct ? '#2563eb' : C.layer2,
+                      backgroundImage: isAct ? 'linear-gradient(135deg, #2563eb 0%, #3b82f6 100%)' : 'none',
+                      color: isAct ? '#ffffff' : C.text,
+                      fontSize: 12,
+                      fontWeight: isAct ? 650 : 500,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      boxShadow: isAct ? '0 2px 8px rgba(37,99,235,.28)' : 'none',
+                      transition: 'all .15s ease',
                     }}
                   >
-                    {tab.badge}
-                  </span>
-                ) : null}
-              </button>
-            )
-          })}
+                    <span style={{ color: isAct ? '#ffffff' : C.text }}>{tab.label}</span>
+                    {tab.badge !== undefined && tab.badge > 0 ? (
+                      <span
+                        style={{
+                          padding: '0 6px',
+                          borderRadius: 999,
+                          fontSize: 10.5,
+                          lineHeight: '16px',
+                          fontWeight: 700,
+                          background: isAct ? '#ffffff' : (tab.tone ?? C.brand),
+                          color: isAct ? '#1d4ed8' : '#ffffff',
+                        }}
+                      >
+                        {tab.badge}
+                      </span>
+                    ) : null}
+                  </button>
+                )
+              })}
+            </div>
+          ))}
         </div>
       </div>
 
@@ -2506,89 +2534,94 @@ export function PanelPage() {
             />
           )}
 
-          {/* 首屏 6 大全栈核心指标卡片（点击直接切到对应分区，免下拉） */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(155px, 1fr))', gap: 10 }}>
-            <Stat
-              label="DSH 本体"
-              icon="🧠"
-              value={reminder?.core.hasUpdate === true ? '有更新' : '已最新'}
-              tone={reminder?.core.hasUpdate !== true ? C.ok : reminder.core.level === 'major' ? C.err : C.brand}
-              hint={`当前 ${snapshot.core.version ?? '?'} · 需重启 ${pendingRestart.length}`}
-              active={activeTab === 'dsh'}
-              onClick={() => setActiveTab(activeTab === 'dsh' ? 'overview' : 'dsh')}
-            />
-            <Stat
-              label="DSH 插件套件"
-              icon="🧩"
-              value={stableUpdates > 0 ? `${stableUpdates} 可更` : '已最新'}
-              tone={stableUpdates > 0 ? C.brand : C.ok}
-              hint={`${registryRows.length} 线上 · ${localTotal} 本地定制`}
-              active={activeTab === 'dsh'}
-              onClick={() => setActiveTab(activeTab === 'dsh' ? 'overview' : 'dsh')}
-            />
-            <Stat
-              label="三节点 Docker"
-              icon="🐳"
-              value={infra === undefined ? '待加载' : dockerUpdatable > 0 ? `${dockerUpdatable} 可更` : '已最新'}
-              tone={dockerUpdatable > 0 ? C.brand : C.ok}
-              hint={infra === undefined ? '点击查看' : `共 ${dockerTotal} 个 · ${dockerLocked} 个保护锁`}
-              active={activeTab === 'docker'}
-              onClick={() => setActiveTab(activeTab === 'docker' ? 'overview' : 'docker')}
-            />
-            <Stat
-              label="双节点系统 APT"
-              icon="🛡️"
-              value={infra === undefined ? '待加载' : aptSafeCount > 0 ? `${aptSafeCount} 可更` : '已最新'}
-              tone={aptSafeCount > 0 ? C.brand : C.ok}
-              hint={infra === undefined ? 'VM100 + PVE' : `PVE 门禁锁 ${aptLockedCount} 个`}
-              active={activeTab === 'apt'}
-              onClick={() => setActiveTab(activeTab === 'apt' ? 'overview' : 'apt')}
-            />
-            <Stat
-              label="本机 CLI 工具链"
-              icon="🧰"
-              value={infra?.toolchain === undefined ? '待加载' : toolchainUpdatable > 0 ? `${toolchainUpdatable} 可更` : '已最新'}
-              tone={toolchainUpdatable > 0 ? C.brand : C.ok}
-              hint={infra?.toolchain === undefined ? 'uv/pnpm/CLI/Obsidian' : `${toolchainTotal} 项受控工具均最新`}
-              active={activeTab === 'toolchain'}
-              onClick={() => setActiveTab(activeTab === 'toolchain' ? 'overview' : 'toolchain')}
-            />
-            <Stat
-              label="Python 虚拟环境"
-              icon="🐍"
-              value={infra?.venvs === undefined ? '待加载' : venvSafeCount > 0 ? `${venvSafeCount} 可更` : '已最新'}
-              tone={venvSafeCount > 0 ? C.brand : C.ok}
-              hint={infra?.venvs === undefined ? '项目 .venv' : `${venvTotal} 个环境同主版本已最新`}
-              active={activeTab === 'venv'}
-              onClick={() => setActiveTab(activeTab === 'venv' ? 'overview' : 'venv')}
-            />
-            <Stat
-              label="Git 仓库与技能"
-              icon="🌿"
-              value={infra?.gitRepos === undefined ? '待加载' : gitUpdatableCount > 0 ? `${gitUpdatableCount} 可同步` : '已最新'}
-              tone={gitUpdatableCount > 0 ? C.brand : C.ok}
-              hint={infra?.gitRepos === undefined ? 'Skills / 插件 / 工程' : `共 ${gitTotalCount} 个 · ${gitLockedCount} 改动锁`}
-              active={activeTab === 'git'}
-              onClick={() => setActiveTab(activeTab === 'git' ? 'overview' : 'git')}
-            />
-            <Stat
-              label="存储与缓存 GC"
-              icon="🧹"
-              value={infra?.cleanups === undefined ? '待加载' : cleanupActionableCount > 0 ? `可省 ${cleanupTotalReclaimText}` : '清爽健康'}
-              tone={cleanupActionableCount > 0 ? C.brand : C.ok}
-              hint={infra?.cleanups === undefined ? 'Docker/pnpm/uv/日志' : `${cleanupActionableCount} 项建议清理`}
-              active={activeTab === 'cleanup'}
-              onClick={() => setActiveTab(activeTab === 'cleanup' ? 'overview' : 'cleanup')}
-            />
-            <Stat
-              label="Systemd 巡检"
-              icon="🩺"
-              value={infra?.systemdHealth === undefined ? '待加载' : systemdFailedCount > 0 ? `${systemdFailedCount} 异常` : '全绿健康'}
-              tone={systemdFailedCount > 0 ? C.err : C.ok}
-              hint={infra?.systemdHealth === undefined ? '服务与定时器' : `${systemdTimersCount} 个活跃定时器运行中`}
-              active={activeTab === 'systemd'}
-              onClick={() => setActiveTab(activeTab === 'systemd' ? 'overview' : 'systemd')}
-            />
+          {/* 首屏 9 大全栈状态卡片：显式分为上下两层（第一层：5 项核心运行与基础设施；第二层：4 项工程仓库与系统治理） */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: 10 }}>
+              <Stat
+                label="DSH 本体"
+                icon="🧠"
+                value={reminder?.core.hasUpdate === true ? '有更新' : '已最新'}
+                tone={reminder?.core.hasUpdate !== true ? C.ok : reminder.core.level === 'major' ? C.err : C.brand}
+                hint={`当前 ${snapshot.core.version ?? '?'} · 需重启 ${pendingRestart.length}`}
+                active={activeTab === 'dsh'}
+                onClick={() => setActiveTab(activeTab === 'dsh' ? 'overview' : 'dsh')}
+              />
+              <Stat
+                label="DSH 插件套件"
+                icon="🧩"
+                value={stableUpdates > 0 ? `${stableUpdates} 可更` : '已最新'}
+                tone={stableUpdates > 0 ? C.brand : C.ok}
+                hint={`${registryRows.length} 线上 · ${localTotal} 本地定制`}
+                active={activeTab === 'dsh'}
+                onClick={() => setActiveTab(activeTab === 'dsh' ? 'overview' : 'dsh')}
+              />
+              <Stat
+                label="三节点 Docker"
+                icon="🐳"
+                value={infra === undefined ? '待加载' : dockerUpdatable > 0 ? `${dockerUpdatable} 可更` : '已最新'}
+                tone={dockerUpdatable > 0 ? C.brand : C.ok}
+                hint={infra === undefined ? '点击查看' : `共 ${dockerTotal} 个 · ${dockerLocked} 个保护锁`}
+                active={activeTab === 'docker'}
+                onClick={() => setActiveTab(activeTab === 'docker' ? 'overview' : 'docker')}
+              />
+              <Stat
+                label="双节点系统 APT"
+                icon="🛡️"
+                value={infra === undefined ? '待加载' : aptSafeCount > 0 ? `${aptSafeCount} 可更` : '已最新'}
+                tone={aptSafeCount > 0 ? C.brand : C.ok}
+                hint={infra === undefined ? 'VM100 + PVE' : `PVE 门禁锁 ${aptLockedCount} 个`}
+                active={activeTab === 'apt'}
+                onClick={() => setActiveTab(activeTab === 'apt' ? 'overview' : 'apt')}
+              />
+              <Stat
+                label="本机 CLI 工具链"
+                icon="🧰"
+                value={infra?.toolchain === undefined ? '待加载' : toolchainUpdatable > 0 ? `${toolchainUpdatable} 可更` : '已最新'}
+                tone={toolchainUpdatable > 0 ? C.brand : C.ok}
+                hint={infra?.toolchain === undefined ? 'uv/pnpm/CLI/Obsidian' : `${toolchainTotal} 项受控工具均最新`}
+                active={activeTab === 'toolchain'}
+                onClick={() => setActiveTab(activeTab === 'toolchain' ? 'overview' : 'toolchain')}
+              />
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 10 }}>
+              <Stat
+                label="Python 虚拟环境"
+                icon="🐍"
+                value={infra?.venvs === undefined ? '待加载' : venvSafeCount > 0 ? `${venvSafeCount} 可更` : '已最新'}
+                tone={venvSafeCount > 0 ? C.brand : C.ok}
+                hint={infra?.venvs === undefined ? '项目 .venv' : `${venvTotal} 个环境同主版本已最新`}
+                active={activeTab === 'venv'}
+                onClick={() => setActiveTab(activeTab === 'venv' ? 'overview' : 'venv')}
+              />
+              <Stat
+                label="Git 仓库与技能"
+                icon="🌿"
+                value={infra?.gitRepos === undefined ? '待加载' : gitUpdatableCount > 0 ? `${gitUpdatableCount} 可同步` : '已最新'}
+                tone={gitUpdatableCount > 0 ? C.brand : C.ok}
+                hint={infra?.gitRepos === undefined ? 'Skills / 插件 / 工程' : `共 ${gitTotalCount} 个 · ${gitLockedCount} 改动锁`}
+                active={activeTab === 'git'}
+                onClick={() => setActiveTab(activeTab === 'git' ? 'overview' : 'git')}
+              />
+              <Stat
+                label="存储与缓存 GC"
+                icon="🧹"
+                value={infra?.cleanups === undefined ? '待加载' : cleanupActionableCount > 0 ? `可省 ${cleanupTotalReclaimText}` : '清爽健康'}
+                tone={cleanupActionableCount > 0 ? C.brand : C.ok}
+                hint={infra?.cleanups === undefined ? 'Docker/pnpm/uv/日志' : `${cleanupActionableCount} 项建议清理`}
+                active={activeTab === 'cleanup'}
+                onClick={() => setActiveTab(activeTab === 'cleanup' ? 'overview' : 'cleanup')}
+              />
+              <Stat
+                label="Systemd 巡检"
+                icon="🩺"
+                value={infra?.systemdHealth === undefined ? '待加载' : systemdFailedCount > 0 ? `${systemdFailedCount} 异常` : '全绿健康'}
+                tone={systemdFailedCount > 0 ? C.err : C.ok}
+                hint={infra?.systemdHealth === undefined ? '服务与定时器' : `${systemdTimersCount} 个活跃定时器运行中`}
+                active={activeTab === 'systemd'}
+                onClick={() => setActiveTab(activeTab === 'systemd' ? 'overview' : 'systemd')}
+              />
+            </div>
           </div>
 
           {showDsh ? (
