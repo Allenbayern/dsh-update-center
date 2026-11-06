@@ -1463,6 +1463,20 @@ export function PanelPage() {
   const [completedKeys, setCompletedKeys] = useState<Record<string, string>>({})
   const [activeTab, setActiveTab] = useState<ViewTab>('overview')
   const [onlyActionable, setOnlyActionable] = useState(false)
+  const [fullPipeline, setFullPipeline] = useState<{
+    running: boolean
+    total: number
+    done: number
+    currentLabel: string
+    items: Array<{
+      key: string
+      label: string
+      category: string
+      status: 'pending' | 'running' | 'ok' | 'failed' | 'skipped'
+      message?: string
+    }>
+  } | undefined>(undefined)
+  const fullCancelRef = useRef(false)
   const actionMutexRef = useRef(false)
 
   const load = useCallback(async (options: { refresh?: boolean; deep?: boolean; mode?: 'local' } = {}) => {
@@ -2030,6 +2044,369 @@ export function PanelPage() {
     }
   }, [load])
 
+  const runFullSequentialUpdate = useCallback(async () => {
+    if (actionMutexRef.current) return
+    const queue: Array<{
+      key: string
+      label: string
+      category: string
+      run: () => Promise<{ ok: boolean; message: string; nextInfra?: InfraSnapshot }>
+    }> = []
+
+    const regCandidates =
+      snapshot === undefined
+        ? []
+        : snapshot.bundles.filter(
+            (r) =>
+              r.status === 'update' &&
+              r.providedByCore !== true &&
+              r.stable?.version !== undefined &&
+              completedKeys[`bundle:${r.name}`] === undefined,
+          )
+    for (const r of regCandidates) {
+      const targetVer = r.stable!.version
+      queue.push({
+        key: `bundle:${r.name}`,
+        label: `DSH 插件 ${r.name} → ${targetVer}`,
+        category: '🧩 DSH 插件',
+        run: async () => {
+          setBusy(r.name)
+          try {
+            const data = await apiJson('/update', {
+              method: 'POST',
+              body: JSON.stringify({ name: r.name, version: targetVer }),
+            })
+            const res = data?.result ?? {}
+            const ok = res.ok === true
+            if (ok) {
+              setCompletedKeys((prev) => ({ ...prev, [`bundle:${r.name}`]: res.to ?? targetVer }))
+            }
+            return { ok, message: String(res.message ?? (ok ? '更新成功' : '更新失败')) }
+          } finally {
+            setBusy(undefined)
+          }
+        },
+      })
+    }
+
+    if (infra !== undefined) {
+      for (const c of infra.docker.containers) {
+        const k = `docker:${c.node}:${c.name}`
+        if (c.status === 'update' && completedKeys[k] === undefined) {
+          queue.push({
+            key: k,
+            label: `Docker 容器 [${c.nodeLabel ?? c.node}] ${c.name}`,
+            category: '🐳 Docker 容器',
+            run: async () => {
+              setInfraBusy(k)
+              try {
+                const data = await apiJson('/infra/docker-update', {
+                  method: 'POST',
+                  body: JSON.stringify({ node: c.node, name: c.name }),
+                })
+                const ok = data?.ok === true
+                if (ok) setCompletedKeys((prev) => ({ ...prev, [k]: 'latest' }))
+                return {
+                  ok,
+                  message: String(data?.message ?? ''),
+                  ...(data?.infra ? { nextInfra: data.infra as InfraSnapshot } : {}),
+                }
+              } finally {
+                setInfraBusy(undefined)
+              }
+            },
+          })
+        }
+      }
+
+      const aptNodesList = infra.apt.nodes ?? [
+        { node: 'local', label: '本机', safeUpdatableCount: infra.apt.vm100.filter((p) => !p.locked).length },
+        { node: 'pve', label: 'PVE', safeUpdatableCount: infra.apt.pve.filter((p) => !p.locked).length },
+      ]
+      for (const n of aptNodesList) {
+        const k = `apt:${n.node}`
+        if (n.safeUpdatableCount > 0 && completedKeys[k] === undefined) {
+          queue.push({
+            key: k,
+            label: `系统安全包 APT (${n.label ?? n.node} · ${n.safeUpdatableCount} 个)`,
+            category: '🛡️ 系统 APT',
+            run: async () => {
+              setInfraBusy(k)
+              try {
+                const data = await apiJson('/infra/apt-update', {
+                  method: 'POST',
+                  body: JSON.stringify({ node: n.node }),
+                })
+                const ok = data?.ok === true
+                if (ok) setCompletedKeys((prev) => ({ ...prev, [k]: 'latest' }))
+                return {
+                  ok,
+                  message: String(data?.message ?? ''),
+                  ...(data?.infra ? { nextInfra: data.infra as InfraSnapshot } : {}),
+                }
+              } finally {
+                setInfraBusy(undefined)
+              }
+            },
+          })
+        }
+      }
+
+      for (const t of infra.toolchain?.items ?? []) {
+        const k = `toolchain:${t.id}`
+        if (t.status === 'update' && completedKeys[k] === undefined) {
+          queue.push({
+            key: k,
+            label: `核心工具链 ${t.name} (${t.installed} → ${t.latest})`,
+            category: '🧰 工具链',
+            run: async () => {
+              setInfraBusy(k)
+              try {
+                const data = await apiJson('/infra/toolchain-update', {
+                  method: 'POST',
+                  body: JSON.stringify({ id: t.id }),
+                })
+                const ok = data?.ok === true
+                if (ok) setCompletedKeys((prev) => ({ ...prev, [k]: 'latest' }))
+                return {
+                  ok,
+                  message: String(data?.message ?? ''),
+                  ...(data?.infra ? { nextInfra: data.infra as InfraSnapshot } : {}),
+                }
+              } finally {
+                setInfraBusy(undefined)
+              }
+            },
+          })
+        }
+      }
+
+      for (const v of infra.venvs?.projects ?? []) {
+        const k = `venv:${v.id}`
+        if (v.safeUpdatableCount > 0 && completedKeys[k] === undefined) {
+          queue.push({
+            key: k,
+            label: `Python 虚拟环境 ${v.project} (${v.safeUpdatableCount} 个安全包)`,
+            category: '🐍 Python .venv',
+            run: async () => {
+              setInfraBusy(k)
+              try {
+                const data = await apiJson('/infra/venv-update', {
+                  method: 'POST',
+                  body: JSON.stringify({ projectId: v.id }),
+                })
+                const ok = data?.ok === true
+                if (ok) setCompletedKeys((prev) => ({ ...prev, [k]: 'latest' }))
+                return {
+                  ok,
+                  message: String(data?.message ?? ''),
+                  ...(data?.infra ? { nextInfra: data.infra as InfraSnapshot } : {}),
+                }
+              } finally {
+                setInfraBusy(undefined)
+              }
+            },
+          })
+        }
+      }
+
+      for (const g of infra.gitRepos?.repos ?? []) {
+        const k = `git:${g.id}`
+        if (g.status === 'update' && completedKeys[k] === undefined) {
+          queue.push({
+            key: k,
+            label: `Git 仓库快进同步 ${g.name} (落后 ${g.behindCount} 个提交)`,
+            category: '🌿 Git 与技能',
+            run: async () => {
+              setInfraBusy(k)
+              try {
+                const data = await apiJson('/infra/git-pull', {
+                  method: 'POST',
+                  body: JSON.stringify({ id: g.id }),
+                })
+                const ok = data?.ok === true
+                if (ok) setCompletedKeys((prev) => ({ ...prev, [k]: 'latest' }))
+                return {
+                  ok,
+                  message: String(data?.message ?? ''),
+                  ...(data?.infra ? { nextInfra: data.infra as InfraSnapshot } : {}),
+                }
+              } finally {
+                setInfraBusy(undefined)
+              }
+            },
+          })
+        }
+      }
+
+      for (const c of infra.cleanups?.items ?? []) {
+        const k = `cleanup:${c.id}`
+        if (c.actionable && completedKeys[k] === undefined) {
+          queue.push({
+            key: k,
+            label: `存储缓存清理 ${c.name} (可省 ${c.reclaimableText})`,
+            category: '🧹 缓存瘦身 GC',
+            run: async () => {
+              setInfraBusy(k)
+              try {
+                const data = await apiJson('/infra/cleanup', {
+                  method: 'POST',
+                  body: JSON.stringify({ id: c.id }),
+                })
+                const ok = data?.ok === true
+                if (ok) setCompletedKeys((prev) => ({ ...prev, [k]: 'latest' }))
+                return {
+                  ok,
+                  message: String(data?.message ?? ''),
+                  ...(data?.infra ? { nextInfra: data.infra as InfraSnapshot } : {}),
+                }
+              } finally {
+                setInfraBusy(undefined)
+              }
+            },
+          })
+        }
+      }
+
+      const failedUnits = (infra.systemdHealth?.failedUnits ?? []).filter(
+        (u) => completedKeys['systemd:all'] === undefined && completedKeys[`systemd:${u.id}`] === undefined,
+      )
+      if (failedUnits.length > 0) {
+        queue.push({
+          key: 'systemd:all',
+          label: `Systemd 异常单元重置 (${failedUnits.length} 个单元)`,
+          category: '🩺 Systemd 巡检',
+          run: async () => {
+            setInfraBusy('systemd:all')
+            try {
+              const data = await apiJson('/infra/systemd-fix', {
+                method: 'POST',
+                body: JSON.stringify({ id: 'all' }),
+              })
+              const ok = data?.ok === true
+              if (ok) setCompletedKeys((prev) => ({ ...prev, 'systemd:all': 'latest' }))
+              return {
+                ok,
+                message: String(data?.message ?? ''),
+                ...(data?.infra ? { nextInfra: data.infra as InfraSnapshot } : {}),
+              }
+            } finally {
+              setInfraBusy(undefined)
+            }
+          },
+        })
+      }
+    }
+
+    if (queue.length === 0) {
+      setOutcome({
+        ok: true,
+        title: '全栈一键顺序更新',
+        detail: '当前所有 9 大维度均无待处理更新或清理项，全栈已处于最新健康状态。',
+      })
+      return
+    }
+
+    actionMutexRef.current = true
+    fullCancelRef.current = false
+    setOutcome(undefined)
+    setFullPipeline({
+      running: true,
+      total: queue.length,
+      done: 0,
+      currentLabel: queue[0]!.label,
+      items: queue.map((q) => ({
+        key: q.key,
+        label: q.label,
+        category: q.category,
+        status: 'pending' as const,
+      })),
+    })
+
+    let okCount = 0
+    let failCount = 0
+    let lastInfra: InfraSnapshot | undefined = undefined
+
+    try {
+      for (let i = 0; i < queue.length; i++) {
+        if (fullCancelRef.current) {
+          setFullPipeline((prev) =>
+            prev === undefined
+              ? undefined
+              : {
+                  ...prev,
+                  items: prev.items.map((it, idx) => (idx >= i ? { ...it, status: 'skipped', message: '已手动停止后续队列' } : it)),
+                },
+          )
+          break
+        }
+        const task = queue[i]!
+        setFullPipeline((prev) =>
+          prev === undefined
+            ? undefined
+            : {
+                ...prev,
+                done: i,
+                currentLabel: task.label,
+                items: prev.items.map((it, idx) => (idx === i ? { ...it, status: 'running' } : it)),
+              },
+        )
+        try {
+          const res = await task.run()
+          if (res.nextInfra !== undefined) {
+            lastInfra = res.nextInfra
+            setInfra(res.nextInfra)
+          }
+          if (res.ok) okCount++
+          else failCount++
+          setFullPipeline((prev) =>
+            prev === undefined
+              ? undefined
+              : {
+                  ...prev,
+                  done: i + 1,
+                  items: prev.items.map((it, idx) =>
+                    idx === i ? { ...it, status: res.ok ? 'ok' : 'failed', message: res.message } : it,
+                  ),
+                },
+          )
+        } catch (err) {
+          failCount++
+          setFullPipeline((prev) =>
+            prev === undefined
+              ? undefined
+              : {
+                  ...prev,
+                  done: i + 1,
+                  items: prev.items.map((it, idx) =>
+                    idx === i ? { ...it, status: 'failed', message: String(err) } : it,
+                  ),
+                },
+          )
+        }
+      }
+    } finally {
+      actionMutexRef.current = false
+      setFullPipeline((prev) =>
+        prev === undefined
+          ? undefined
+          : {
+              ...prev,
+              running: false,
+              currentLabel: fullCancelRef.current ? '队列已停止' : '全部队列执行完毕',
+            },
+      )
+      setOutcome({
+        ok: failCount === 0,
+        title: `全栈一键顺序更新完成（成功 ${okCount} 项${failCount > 0 ? `，失败 ${failCount} 项` : ''}）`,
+        detail: `已按次序逐项执行完毕 ${okCount + failCount} / ${queue.length} 个运维任务。`,
+      })
+      if (regCandidates.length > 0) await load()
+      if (lastInfra === undefined) await loadInfra(false)
+      await loadHistory()
+    }
+  }, [snapshot, infra, completedKeys, load, loadInfra, loadHistory])
+
   const registryRows = useMemo(
     () => (snapshot === undefined ? [] : snapshot.bundles.filter((row) => row.status !== 'not-registry' && row.providedByCore !== true)),
     [snapshot],
@@ -2052,10 +2429,12 @@ export function PanelPage() {
   const reminder = useMemo(() => (snapshot === undefined ? undefined : reminderFrom(snapshot)), [snapshot])
   const pendingRestart = snapshot?.pendingRestart ?? []
   const batchItemRunning = batch?.running === true ? batch.current : undefined
+  const fullRunning = fullPipeline?.running === true
   const anyBusy =
     busy !== undefined ||
     infraBusy !== undefined ||
     batchRunning ||
+    fullRunning ||
     coreRunning ||
     launching ||
     restarting
@@ -2169,6 +2548,22 @@ export function PanelPage() {
     cleanupActionableCount +
     systemdFailedCount
 
+  const sequentialActionableCount =
+    stableUpdates +
+    dockerUpdatable +
+    (aptSafeCount > 0
+      ? (infra?.apt.nodes ?? [
+          { node: 'local', safeUpdatableCount: infra?.apt.vm100.filter((p) => !p.locked).length ?? 0 },
+          { node: 'pve', safeUpdatableCount: infra?.apt.pve.filter((p) => !p.locked).length ?? 0 },
+        ]).filter((n) => n.safeUpdatableCount > 0 && completedKeys[`apt:${n.node}`] === undefined).length
+      : 0) +
+    toolchainUpdatable +
+    (infra?.venvs?.projects.filter((v) => v.safeUpdatableCount > 0 && completedKeys[`venv:${v.id}`] === undefined)
+      .length ?? 0) +
+    gitUpdatableCount +
+    cleanupActionableCount +
+    (systemdFailedCount > 0 ? 1 : 0)
+
   return (
     <div
       data-dsh-plugin="dsh-update-center"
@@ -2244,11 +2639,23 @@ export function PanelPage() {
             <Btn
               tone="primary"
               size="md"
+              disabled={scanning || infraLoading || anyBusy || sequentialActionableCount === 0}
+              onClick={() => void runFullSequentialUpdate()}
+              title="按安全顺序依次自动执行全栈所有可处理项：DSH插件 → Docker容器 → 系统APT → 工具链 → Python .venv → Git同步 → 缓存瘦身 → Systemd重置"
+            >
+              {fullRunning
+                ? `⏳ 顺序更新中 (${fullPipeline?.done ?? 0}/${fullPipeline?.total ?? 0})…`
+                : anyBusy
+                  ? '⏸ 等待当前任务…'
+                  : `⚡ 一键更新全部（${sequentialActionableCount}）`}
+            </Btn>
+            <Btn
+              size="sm"
               disabled={scanning || anyBusy || stableUpdates === 0}
               onClick={() => void updateAll('stable')}
-              title="串行更新所有有正式版更新的 DSH 套件，不重启服务"
+              title="仅串行更新所有有正式版更新的 DSH 套件，不重启服务"
             >
-              {batchRunning ? '⏳ 批量进行中…' : anyBusy ? '⏸ 等待当前任务…' : '更新插件（' + stableUpdates + '）'}
+              {batchRunning ? '⏳ 批量进行中…' : anyBusy ? '⏸ 等待…' : '仅更插件（' + stableUpdates + '）'}
             </Btn>
             {previewUpdates > stableUpdates ? (
               <Btn size="sm" disabled={scanning || anyBusy} onClick={() => void updateAll('preview')} title="把仅预览版更新的套件也算进来">
@@ -2258,11 +2665,11 @@ export function PanelPage() {
           </div>
         </header>
 
-        {/* 分区快捷切换胶囊条（分两层展示：上层系统与容器核心，下层工程与系统维护） */}
+        {/* 分区快捷切换胶囊条（分两层展示：上层系统与容器核心，下层工程与系统维护 + 一键顺序更新胶囊） */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {[
-            { tag: '核心层', items: tabRowPrimary },
-            { tag: '维护层', items: tabRowSecondary },
+            { tag: '核心层', items: tabRowPrimary, showQuickAll: true },
+            { tag: '维护层', items: tabRowSecondary, showQuickAll: false },
           ].map((rowGroup) => (
             <div key={rowGroup.tag} style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
               <span
@@ -2327,6 +2734,63 @@ export function PanelPage() {
                   </button>
                 )
               })}
+              {rowGroup.showQuickAll ? (
+                <button
+                  type="button"
+                  disabled={scanning || infraLoading || anyBusy || sequentialActionableCount === 0}
+                  onClick={() => void runFullSequentialUpdate()}
+                  title="点击后按次序自动一个接一个更新所有可处理项，无需逐个分区点击"
+                  style={{
+                    appearance: 'none',
+                    WebkitAppearance: 'none',
+                    marginLeft: 'auto',
+                    height: 28,
+                    padding: '0 14px',
+                    borderRadius: 999,
+                    border:
+                      sequentialActionableCount > 0 && !anyBusy
+                        ? '1px solid #10b981'
+                        : '1px solid ' + C.line2,
+                    backgroundColor:
+                      sequentialActionableCount > 0 && !anyBusy
+                        ? '#059669'
+                        : C.layer2,
+                    backgroundImage:
+                      sequentialActionableCount > 0 && !anyBusy
+                        ? 'linear-gradient(135deg, #059669 0%, #10b981 100%)'
+                        : 'none',
+                    color: sequentialActionableCount > 0 && !anyBusy ? '#ffffff' : C.dim,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor:
+                      scanning || infraLoading || anyBusy || sequentialActionableCount === 0
+                        ? 'not-allowed'
+                        : 'pointer',
+                    opacity:
+                      scanning || infraLoading || anyBusy || sequentialActionableCount === 0
+                        ? 0.65
+                        : 1,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    boxShadow:
+                      sequentialActionableCount > 0 && !anyBusy
+                        ? '0 2px 10px rgba(16,185,129,.32)'
+                        : 'none',
+                    transition: 'all .15s ease',
+                  }}
+                >
+                  <span>
+                    {fullRunning
+                      ? `⏳ 正在顺序更新 (${fullPipeline?.done ?? 0}/${fullPipeline?.total ?? 0})…`
+                      : anyBusy
+                        ? '⏸ 队列繁忙中…'
+                        : sequentialActionableCount > 0
+                          ? `⚡ 一键顺序更新 (${sequentialActionableCount})`
+                          : '✓ 全栈已最新'}
+                  </span>
+                </button>
+              ) : null}
             </div>
           ))}
         </div>
@@ -2390,6 +2854,60 @@ export function PanelPage() {
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            disabled={scanning || infraLoading || anyBusy || sequentialActionableCount === 0}
+            onClick={() => void runFullSequentialUpdate()}
+            title="点击后按安全次序依次执行全栈所有可处理更新与清理任务"
+            style={{
+              appearance: 'none',
+              WebkitAppearance: 'none',
+              height: 44,
+              padding: '0 18px',
+              borderRadius: 10,
+              border:
+                sequentialActionableCount > 0 && !anyBusy
+                  ? '1px solid #34d399'
+                  : '1px solid rgba(148,163,184,.3)',
+              backgroundColor:
+                sequentialActionableCount > 0 && !anyBusy
+                  ? '#059669'
+                  : 'rgba(15,23,42,.8)',
+              backgroundImage:
+                sequentialActionableCount > 0 && !anyBusy
+                  ? 'linear-gradient(135deg, #059669 0%, #10b981 100%)'
+                  : 'none',
+              color: '#ffffff',
+              fontSize: 13.5,
+              fontWeight: 700,
+              cursor:
+                scanning || infraLoading || anyBusy || sequentialActionableCount === 0
+                  ? 'not-allowed'
+                  : 'pointer',
+              opacity:
+                scanning || infraLoading || anyBusy || sequentialActionableCount === 0
+                  ? 0.72
+                  : 1,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              boxShadow:
+                sequentialActionableCount > 0 && !anyBusy
+                  ? '0 4px 16px rgba(16,185,129,.4)'
+                  : 'none',
+              transition: 'all .15s ease',
+            }}
+          >
+            <span>
+              {fullRunning
+                ? `⏳ 顺序更新中 (${fullPipeline?.done ?? 0}/${fullPipeline?.total ?? 0})…`
+                : anyBusy
+                  ? '⏸ 正在执行任务…'
+                  : sequentialActionableCount > 0
+                    ? `⚡ 一键顺序更新全部 (${sequentialActionableCount})`
+                    : '✨ 全栈已最新 (0 待处理)'}
+            </span>
+          </button>
           <div
             style={{
               background: 'rgba(15,23,42,.75)',
@@ -2426,6 +2944,128 @@ export function PanelPage() {
           </div>
         </div>
       </div>
+
+      {/* 全栈一键顺序更新队列实时进度面板 */}
+      {fullPipeline === undefined ? null : (
+        <div
+          style={{
+            border: '1px solid ' + (fullPipeline.running ? C.brand : C.ok),
+            borderLeft: '4px solid ' + (fullPipeline.running ? C.brand : C.ok),
+            borderRadius: 12,
+            padding: '12px 16px',
+            background: C.layer1,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span style={{ fontWeight: 700, fontSize: 13.5, color: C.text }}>
+                {fullPipeline.running ? '⚡ 全栈顺序更新队列正在逐项执行' : '✓ 全栈顺序更新队列执行记录'}
+              </span>
+              <Tag tone={fullPipeline.running ? C.brand : C.ok}>
+                进度 {fullPipeline.done} / {fullPipeline.total}
+              </Tag>
+              <Meta>{fullPipeline.currentLabel}</Meta>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {fullPipeline.running ? (
+                <Btn
+                  size="sm"
+                  tone="danger"
+                  onClick={() => {
+                    fullCancelRef.current = true
+                  }}
+                  title="当前正在执行的单个任务完成后，停止后续排队的任务"
+                >
+                  ⏹ 停止后续队列
+                </Btn>
+              ) : (
+                <Btn size="sm" tone="ghost" onClick={() => setFullPipeline(undefined)}>
+                  收起队列详情
+                </Btn>
+              )}
+            </div>
+          </div>
+
+          <div
+            style={{
+              height: 6,
+              borderRadius: 999,
+              background: C.layer2,
+              overflow: 'hidden',
+            }}
+          >
+            <div
+              style={{
+                width: `${fullPipeline.total > 0 ? Math.round((fullPipeline.done / fullPipeline.total) * 100) : 100}%`,
+                height: '100%',
+                background: 'linear-gradient(90deg, #2563eb 0%, #10b981 100%)',
+                transition: 'width .25s ease',
+              }}
+            />
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 200, overflowY: 'auto' }}>
+            {fullPipeline.items.map((item, idx) => {
+              const icon =
+                item.status === 'running'
+                  ? '⏳'
+                  : item.status === 'ok'
+                    ? '✓'
+                    : item.status === 'failed'
+                      ? '✕'
+                      : item.status === 'skipped'
+                        ? '⏭'
+                        : '•'
+              const color =
+                item.status === 'running'
+                  ? C.brand
+                  : item.status === 'ok'
+                    ? C.ok
+                    : item.status === 'failed'
+                      ? C.err
+                      : C.dim
+              return (
+                <div
+                  key={item.key}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                    padding: '4px 8px',
+                    borderRadius: 6,
+                    background: item.status === 'running' ? C.layer2 : 'transparent',
+                    fontSize: 12,
+                  }}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                    <span style={{ fontWeight: 700, color, width: 16, textAlign: 'center' }}>{icon}</span>
+                    <span style={{ color: C.dim, fontFamily: MONO, fontSize: 11 }}>#{idx + 1}</span>
+                    <Tag tone={color}>{item.category}</Tag>
+                    <span style={{ fontWeight: item.status === 'running' ? 650 : 500, color: C.text }}>
+                      {item.label}
+                    </span>
+                  </span>
+                  <span style={{ fontSize: 11.5, color, flexShrink: 0 }}>
+                    {item.status === 'running'
+                      ? '正在执行…'
+                      : item.status === 'ok'
+                        ? '已完成'
+                        : item.status === 'failed'
+                          ? item.message || '执行失败'
+                          : item.status === 'skipped'
+                            ? '已跳过'
+                            : '排队等待'}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
 
       {/* 置顶操作反馈横幅（无论在哪个分区执行操作，结果立即显示在顶部） */}
       {outcome === undefined ? null : (
