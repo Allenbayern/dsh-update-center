@@ -1,7 +1,7 @@
 {
   "name": "@dsh-external/dsh-update-center",
-  "version": "0.3.0",
-  "description": "DSH 更新中心：汇总 DSH 本体、插件套件、Docker 容器、APT 安全包、全局 CLI 工具链与本地 Python 虚拟环境 (.venv) 的零配置自动发现与一键更新",
+  "version": "0.4.0",
+  "description": "DSH 更新中心：汇总 DSH 本体、插件套件、Docker 容器、APT 安全包、CLI 工具链与独立二进制、Python 虚拟环境 (.venv)、Git 仓库与 Skills、存储缓存瘦身 (GC) 及 Systemd 巡检的 9 维零配置自动发现与一键运维",
   "private": true,
   "repository": {
     "type": "git",

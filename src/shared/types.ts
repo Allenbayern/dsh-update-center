@@ -340,7 +340,19 @@ export interface CoreRunState {
 
 export interface HistoryEntry {
   at: string
-  kind: 'single' | 'batch' | 'core' | 'convert' | 'restart' | 'docker' | 'apt' | 'toolchain' | 'venv'
+  kind:
+    | 'single'
+    | 'batch'
+    | 'core'
+    | 'convert'
+    | 'restart'
+    | 'docker'
+    | 'apt'
+    | 'toolchain'
+    | 'venv'
+    | 'git'
+    | 'cleanup'
+    | 'systemd'
   name?: string
   from?: string
   to?: string
@@ -391,7 +403,7 @@ export interface AptNodeSummary {
 export interface ToolchainRow {
   id: string
   name: string
-  category: 'cli' | 'npm-global' | 'uv-tool' | 'desktop'
+  category: 'cli' | 'npm-global' | 'uv-tool' | 'desktop' | 'infra-bin'
   installed: string
   latest?: string
   status: 'latest' | 'update' | 'locked' | 'error'
@@ -416,6 +428,47 @@ export interface ProjectVenvRow {
   packages: VenvPackageItem[]
 }
 
+export interface GitRepoRow {
+  id: string
+  name: string
+  category: 'skill' | 'dsh-plugin' | 'project'
+  repoPath: string
+  branch: string
+  remoteUrl: string
+  localCommit: string
+  remoteCommit?: string
+  behindCount: number
+  aheadCount: number
+  dirtyCount: number
+  status: 'latest' | 'update' | 'locked' | 'error'
+  lockReason?: string
+  detail?: string
+}
+
+export interface CleanupItemRow {
+  id: string
+  name: string
+  category: 'docker' | 'package-cache' | 'browser-cache' | 'system-log'
+  node: string
+  nodeLabel: string
+  sizeText: string
+  reclaimableText: string
+  reclaimableBytes: number
+  actionable: boolean
+  detail: string
+}
+
+export interface SystemdUnitRow {
+  id: string
+  unit: string
+  scope: 'system' | 'user'
+  loadState: string
+  activeState: string
+  subState: string
+  description: string
+  actionable: boolean
+}
+
 export interface InfraSnapshot {
   generatedAt: string
   docker: {
@@ -438,5 +491,21 @@ export interface InfraSnapshot {
   venvs?: {
     projects: ProjectVenvRow[]
     totalSafeUpdatable: number
+  }
+  gitRepos?: {
+    repos: GitRepoRow[]
+    updatableCount: number
+    lockedCount: number
+  }
+  cleanups?: {
+    items: CleanupItemRow[]
+    actionableCount: number
+    totalReclaimableBytes: number
+    totalReclaimableText: string
+  }
+  systemdHealth?: {
+    failedUnits: SystemdUnitRow[]
+    failedCount: number
+    activeTimersCount: number
   }
 }

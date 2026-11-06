@@ -5,9 +5,12 @@ import { homedir, hostname } from 'node:os'
 import type {
   AptNodeSummary,
   AptPackageRow,
+  CleanupItemRow,
   DockerContainerRow,
+  GitRepoRow,
   InfraSnapshot,
   ProjectVenvRow,
+  SystemdUnitRow,
   ToolchainRow,
   VenvPackageItem,
 } from '../shared/types.js'
@@ -514,11 +517,14 @@ export async function scanInfra(options: { refresh?: boolean } = {}): Promise<In
     if (cached !== undefined && cached.toolchain !== undefined && cached.venvs !== undefined) return cached
   }
   remoteDigestCache.clear()
-  const [docker, apt, toolchain, venvs] = await Promise.all([
+  const [docker, apt, toolchain, venvs, gitRepos, cleanups, systemdHealth] = await Promise.all([
     scanAllDocker(),
     scanAllApt(),
     scanAllToolchain(),
     scanAllVenvs(),
+    scanAllGitRepos(),
+    scanAllCleanups(),
+    scanSystemdHealth(),
   ])
   const snapshot: InfraSnapshot = {
     generatedAt: new Date().toISOString(),
@@ -526,6 +532,9 @@ export async function scanInfra(options: { refresh?: boolean } = {}): Promise<In
     apt,
     toolchain,
     venvs,
+    gitRepos,
+    cleanups,
+    systemdHealth,
   }
   cachedInfra = snapshot
   try {
@@ -735,6 +744,84 @@ export async function scanAllToolchain(): Promise<{ items: ToolchainRow[]; updat
     /* ignore */
   }
 
+  // 6. 基础设施独立二进制（Node.js / Caddy / Tailscale / Chrome）
+  await Promise.all([
+    (async () => {
+      const nodeRes = await runCmd('node', ['--version'], 4000)
+      if (nodeRes.code !== 0 || !nodeRes.stdout.trim()) return
+      const installed = nodeRes.stdout.trim().replace(/^v/, '')
+      const major = installed.split('.')[0]
+      const distList = await fetchJson('https://nodejs.org/dist/index.json')
+      let latest: string | undefined
+      if (Array.isArray(distList)) {
+        const sameMajor = distList.find((x: any) => typeof x?.version === 'string' && x.version.startsWith(`v${major}.`))
+        latest = sameMajor?.version?.replace(/^v/, '')
+      }
+      const isStandalone = existsSync('/usr/local/bin/node')
+      items.push({
+        id: 'infra:node',
+        name: `Node.js 运行时 (v${major}.x 同主版本线)`,
+        category: 'infra-bin',
+        installed,
+        ...(latest ? { latest } : {}),
+        status:
+          latest && latest !== installed
+            ? isStandalone
+              ? 'update'
+              : 'locked'
+            : 'latest',
+        detail: isStandalone ? '/usr/local/bin/node (官方 linux-x64 发行包)' : '系统包管理器托管 Node.js',
+      })
+    })(),
+    (async () => {
+      const caddyBin = existsSync('/usr/local/bin/caddy') ? '/usr/local/bin/caddy' : 'caddy'
+      const caddyRes = await runCmd(caddyBin, ['version'], 4000)
+      if (caddyRes.code !== 0 || !caddyRes.stdout.trim()) return
+      const installed = caddyRes.stdout.trim().match(/v?([0-9]+\.[0-9]+\.[0-9]+)/)?.[1] ?? 'unknown'
+      const gh = await fetchJson('https://api.github.com/repos/caddyserver/caddy/releases/latest')
+      const latest = typeof gh?.tag_name === 'string' ? gh.tag_name.replace(/^v/, '') : undefined
+      items.push({
+        id: 'infra:caddy',
+        name: 'Caddy Web Server (反向代理与 HTTPS 网关)',
+        category: 'infra-bin',
+        installed,
+        ...(latest ? { latest } : {}),
+        status: latest && installed !== 'unknown' && latest !== installed ? 'update' : 'latest',
+        detail: `${caddyBin} (caddy upgrade / GitHub Release)`,
+      })
+    })(),
+    (async () => {
+      const tsRes = await runCmd('tailscale', ['version'], 4000)
+      if (tsRes.code !== 0 || !tsRes.stdout.trim()) return
+      const installed = tsRes.stdout.trim().split('\n')[0]?.trim() ?? 'unknown'
+      const gh = await fetchJson('https://api.github.com/repos/tailscale/tailscale/releases/latest')
+      const latest = typeof gh?.tag_name === 'string' ? gh.tag_name.replace(/^v/, '') : undefined
+      items.push({
+        id: 'infra:tailscale',
+        name: 'Tailscale (Mesh 组网守护进程)',
+        category: 'infra-bin',
+        installed,
+        ...(latest ? { latest } : {}),
+        status: latest && installed !== 'unknown' && latest !== installed ? 'update' : 'latest',
+        detail: 'tailscale update --yes',
+      })
+    })(),
+    (async () => {
+      const chrRes = await runCmd('google-chrome', ['--version'], 4000)
+      if (chrRes.code !== 0 || !chrRes.stdout.trim()) return
+      const installed = chrRes.stdout.trim().match(/([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)/)?.[1] ?? 'unknown'
+      items.push({
+        id: 'infra:chrome',
+        name: 'Google Chrome (CDP 浏览器内核)',
+        category: 'infra-bin',
+        installed,
+        latest: installed,
+        status: 'latest',
+        detail: '/usr/bin/google-chrome (随系统 APT 通道维护)',
+      })
+    })(),
+  ])
+
   const updatableCount = items.filter((i) => i.status === 'update').length
   return { items, updatableCount }
 }
@@ -839,6 +926,51 @@ echo "Updated ${pkgName} to ${latestVer}"`
     return {
       ok: res.code === 0,
       message: res.code === 0 ? `全局 CLI 工具 ${pkgName} 已升级至 v${latestVer}` : `${pkgName} 升级失败 (exit ${res.code})`,
+      output: (res.stdout + '\n' + res.stderr).trim().slice(-1500),
+    }
+  }
+
+  if (id === 'infra:node') {
+    const nodeRes = await runCmd('node', ['--version'], 4000)
+    const installed = nodeRes.stdout.trim().replace(/^v/, '')
+    const major = installed.split('.')[0] || '24'
+    const distList = await fetchJson('https://nodejs.org/dist/index.json')
+    const sameMajor = Array.isArray(distList)
+      ? distList.find((x: any) => typeof x?.version === 'string' && x.version.startsWith(`v${major}.`))
+      : undefined
+    const ver = typeof sameMajor?.version === 'string' ? sameMajor.version.replace(/^v/, '') : ''
+    if (!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(ver)) {
+      return { ok: false, message: '无法获取上游 Node.js 同主版本最新发行号' }
+    }
+    const script = `set -e
+TMP_DIR=$(mktemp -d)
+trap "rm -rf '$TMP_DIR'" EXIT
+curl -fsSL "https://nodejs.org/dist/v${ver}/node-v${ver}-linux-x64.tar.xz" | tar -xJ --strip-components=1 -C "$TMP_DIR"
+sudo cp -f "$TMP_DIR/bin/node" /usr/local/bin/node
+/usr/local/bin/node --version`
+    const res = await runCmd('bash', ['-c', script], 240000)
+    return {
+      ok: res.code === 0,
+      message: res.code === 0 ? `Node.js 已安全升级至 v${ver}` : `Node.js 升级失败 (exit ${res.code})`,
+      output: (res.stdout + '\n' + res.stderr).trim().slice(-1500),
+    }
+  }
+
+  if (id === 'infra:caddy') {
+    const caddyBin = existsSync('/usr/local/bin/caddy') ? '/usr/local/bin/caddy' : 'caddy'
+    const res = await runCmd('sudo', [caddyBin, 'upgrade'], 180000)
+    return {
+      ok: res.code === 0,
+      message: res.code === 0 ? 'Caddy 已完成原地升级' : `Caddy 升级失败 (exit ${res.code})`,
+      output: (res.stdout + '\n' + res.stderr).trim().slice(-1500),
+    }
+  }
+
+  if (id === 'infra:tailscale') {
+    const res = await runCmd('sudo', ['tailscale', 'update', '--yes'], 240000)
+    return {
+      ok: res.code === 0,
+      message: res.code === 0 ? 'Tailscale 已升级至最新版本' : `Tailscale 升级失败 (exit ${res.code})`,
       output: (res.stdout + '\n' + res.stderr).trim().slice(-1500),
     }
   }
@@ -1168,5 +1300,539 @@ export async function updateSafeApt(
       : `${nodeCfg.label} APT 更新失败 (exit ${res.code})`,
     updatedPackages: ok ? safePkgs : [],
     output: (res.stdout + '\n' + res.stderr).trim().slice(-2000),
+  }
+}
+
+// ── Git 上游仓库与 Agent Skills 追更（自动扫描 + git fetch + git pull --ff-only） ──
+
+function discoverGitRepos(): Array<{ id: string; name: string; category: 'skill' | 'dsh-plugin' | 'project'; repoPath: string }> {
+  const home = homedir()
+  const scanTargets: Array<{ root: string; category: 'skill' | 'dsh-plugin' | 'project'; prefix: string }> = [
+    { root: join(home, '.agents', 'skills'), category: 'skill', prefix: 'skill' },
+    { root: join(home, 'dsh-plugins'), category: 'dsh-plugin', prefix: 'plugin' },
+    { root: join(home, 'Projects'), category: 'project', prefix: 'project' },
+    { root: join(home, 'projects'), category: 'project', prefix: 'project' },
+    { root: join(home, 'workspace'), category: 'project', prefix: 'project' },
+  ]
+
+  const seenPaths = new Set<string>()
+  const out: Array<{ id: string; name: string; category: 'skill' | 'dsh-plugin' | 'project'; repoPath: string }> = []
+
+  for (const target of scanTargets) {
+    if (!existsSync(target.root)) continue
+    try {
+      for (const entry of readdirSync(target.root)) {
+        if (entry.startsWith('.') || entry.includes('.retired') || entry === 'node_modules') continue
+        const full = resolve(target.root, entry)
+        if (seenPaths.has(full)) continue
+        try {
+          if (!statSync(full).isDirectory()) continue
+          if (!existsSync(join(full, '.git'))) continue
+          seenPaths.add(full)
+          out.push({
+            id: `${target.prefix}:${entry}`,
+            name: entry,
+            category: target.category,
+            repoPath: full,
+          })
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return out
+}
+
+export async function scanAllGitRepos(): Promise<{
+  repos: GitRepoRow[]
+  updatableCount: number
+  lockedCount: number
+}> {
+  const candidates = discoverGitRepos()
+  const repos: GitRepoRow[] = []
+
+  await Promise.all(
+    candidates.map(async (cand) => {
+      const remoteRes = await runCmd('git', ['-C', cand.repoPath, 'remote', 'get-url', 'origin'], 4000)
+      const remoteUrl = remoteRes.stdout.trim()
+      if (remoteRes.code !== 0 || !remoteUrl) return
+      // 仅追踪公开 HTTP(S) 上游仓库（如 GitHub / GitLab / Codeberg），跳过无上游或私有内网备份裸仓
+      if (!/^https?:\/\//i.test(remoteUrl)) return
+
+      await runCmd('git', ['-C', cand.repoPath, 'fetch', '--quiet', 'origin'], 12000)
+
+      const [branchRes, headRes, statusRes] = await Promise.all([
+        runCmd('git', ['-C', cand.repoPath, 'rev-parse', '--abbrev-ref', 'HEAD'], 4000),
+        runCmd('git', ['-C', cand.repoPath, 'rev-parse', '--short', 'HEAD'], 4000),
+        runCmd('git', ['-C', cand.repoPath, 'status', '--porcelain'], 5000),
+      ])
+
+      const branch = branchRes.stdout.trim() || 'main'
+      const localCommit = headRes.stdout.trim() || 'unknown'
+      const dirtyLines = statusRes.stdout
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+      const dirtyCount = dirtyLines.length
+
+      const upstreamRef = `origin/${branch}`
+      const [remoteCommitRes, revListRes] = await Promise.all([
+        runCmd('git', ['-C', cand.repoPath, 'rev-parse', '--short', upstreamRef], 4000),
+        runCmd('git', ['-C', cand.repoPath, 'rev-list', '--left-right', '--count', `HEAD...${upstreamRef}`], 4000),
+      ])
+
+      const remoteCommit = remoteCommitRes.code === 0 ? remoteCommitRes.stdout.trim() : undefined
+      let aheadCount = 0
+      let behindCount = 0
+      if (revListRes.code === 0 && revListRes.stdout.trim()) {
+        const parts = revListRes.stdout.trim().split(/\s+/)
+        aheadCount = Number(parts[0]) || 0
+        behindCount = Number(parts[1]) || 0
+      }
+
+      let status: GitRepoRow['status'] = 'latest'
+      let lockReason: string | undefined
+      if (behindCount > 0) {
+        if (dirtyCount > 0) {
+          status = 'locked'
+          lockReason = `工作区有 ${dirtyCount} 处本地未提交改动，为防止覆盖本地修改已自动锁定（请先 stash 或 commit）`
+        } else if (aheadCount > 0) {
+          status = 'locked'
+          lockReason = `本地领先 ${aheadCount} 个提交且远端领先 ${behindCount} 个提交（存在分叉），需手动 rebase`
+        } else {
+          status = 'update'
+        }
+      }
+
+      repos.push({
+        id: cand.id,
+        name: cand.name,
+        category: cand.category,
+        repoPath: cand.repoPath,
+        branch,
+        remoteUrl,
+        localCommit,
+        ...(remoteCommit ? { remoteCommit } : {}),
+        behindCount,
+        aheadCount,
+        dirtyCount,
+        status,
+        ...(lockReason ? { lockReason } : {}),
+        detail: `${cand.repoPath} (${branch})`,
+      })
+    }),
+  )
+
+  const catOrder: Record<GitRepoRow['category'], number> = { skill: 0, 'dsh-plugin': 1, project: 2 }
+  repos.sort((a, b) => catOrder[a.category] - catOrder[b.category] || a.name.localeCompare(b.name))
+
+  return {
+    repos,
+    updatableCount: repos.filter((r) => r.status === 'update').length,
+    lockedCount: repos.filter((r) => r.status === 'locked').length,
+  }
+}
+
+export async function pullGitRepo(
+  id: string,
+): Promise<{ ok: boolean; message: string; output?: string }> {
+  const data = await scanAllGitRepos()
+  const repo = data.repos.find((r) => r.id === id)
+  if (!repo) {
+    return { ok: false, message: `未找到 Git 仓库: ${id}` }
+  }
+  if (repo.status === 'locked') {
+    return { ok: false, message: `拒绝拉取 ${repo.name}：${repo.lockReason ?? '工作区存在未提交改动'}` }
+  }
+  const pullRes = await runCmd('git', ['-C', repo.repoPath, 'pull', '--ff-only', 'origin', repo.branch], 60000)
+  let extraOut = ''
+  if (pullRes.code === 0 && repo.category === 'dsh-plugin' && existsSync(join(repo.repoPath, 'scripts', 'build.sh'))) {
+    const buildRes = await runCmd('bash', ['./scripts/build.sh'], 120000)
+    extraOut = `\n${buildRes.stdout}\n${buildRes.stderr}`
+  }
+  const headRes = await runCmd('git', ['-C', repo.repoPath, 'rev-parse', '--short', 'HEAD'], 4000)
+  const newCommit = headRes.stdout.trim() || repo.remoteCommit || repo.localCommit
+  const ok = pullRes.code === 0
+  return {
+    ok,
+    message: ok
+      ? `仓库 ${repo.name} 已快进同步至最新提交 (${repo.localCommit} → ${newCommit})`
+      : `仓库 ${repo.name} 拉取失败 (exit ${pullRes.code})`,
+    output: (pullRes.stdout + '\n' + pullRes.stderr + extraOut).trim().slice(-2000),
+  }
+}
+
+// ── 跨节点存储与缓存瘦身（Docker 悬空镜像 / pnpm store / uv cache / Playwright 旧内核 / Journal 日志） ──
+
+function parseSizeToBytes(text: string): number {
+  const m = text.trim().match(/^([0-9.]+)\s*(B|kB|KB|MB|GB|TB|KiB|MiB|GiB|TiB)/i)
+  if (!m) return 0
+  const val = parseFloat(m[1]!)
+  const unit = m[2]!.toUpperCase()
+  if (unit === 'B') return val
+  if (unit === 'KB' || unit === 'KIB') return val * 1024
+  if (unit === 'MB' || unit === 'MIB') return val * 1024 * 1024
+  if (unit === 'GB' || unit === 'GIB') return val * 1024 * 1024 * 1024
+  if (unit === 'TB' || unit === 'TIB') return val * 1024 * 1024 * 1024 * 1024
+  return 0
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes <= 0) return '0 B'
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+export async function scanAllCleanups(): Promise<{
+  items: CleanupItemRow[]
+  actionableCount: number
+  totalReclaimableBytes: number
+  totalReclaimableText: string
+}> {
+  const items: CleanupItemRow[] = []
+  const dockerNodes = await resolveDockerNodes()
+
+  // 1. 各节点 Docker 悬空镜像与构建缓存
+  await Promise.all(
+    dockerNodes.map(async (node) => {
+      const dfRes = await execOnDockerNode(
+        node,
+        `docker system df --format '{{.Type}}|{{.Size}}|{{.Reclaimable}}'`,
+        12000,
+      )
+      if (dfRes.code !== 0 || !dfRes.stdout.trim()) return
+      let totalSizeBytes = 0
+      let reclaimableBytes = 0
+      const parts: string[] = []
+      for (const line of dfRes.stdout.trim().split('\n')) {
+        const [type, size, reclaim] = line.split('|')
+        if (!type || !size || !reclaim) continue
+        if (type === 'Images' || type === 'Build Cache') {
+          const cleanReclaim = reclaim.replace(/\s*\([^)]*\)/, '').trim()
+          const rBytes = parseSizeToBytes(cleanReclaim)
+          const sBytes = parseSizeToBytes(size)
+          totalSizeBytes += sBytes
+          reclaimableBytes += rBytes
+          parts.push(`${type}: 总计 ${size}, 可回收 ${reclaim}`)
+        }
+      }
+      const actionable = reclaimableBytes > 32 * 1024 * 1024 // > 32MB 提示可清理
+      items.push({
+        id: `docker-prune:${node.id}`,
+        name: `${node.label} Docker 悬空镜像与构建缓存`,
+        category: 'docker',
+        node: node.id,
+        nodeLabel: node.label,
+        sizeText: formatBytes(totalSizeBytes),
+        reclaimableText: formatBytes(reclaimableBytes),
+        reclaimableBytes,
+        actionable,
+        detail: parts.join(' · ') || 'docker image prune -f && docker builder prune -f',
+      })
+    }),
+  )
+
+  const home = homedir()
+
+  // 2. pnpm 全局内容寻址缓存 (~/.local/share/pnpm/store)
+  const pnpmStoreDir = join(home, '.local', 'share', 'pnpm', 'store')
+  if (existsSync(pnpmStoreDir)) {
+    const duRes = await runCmd('du', ['-sb', pnpmStoreDir], 8000)
+    const bytes = Number(duRes.stdout.trim().split(/\s+/)[0]) || 0
+    items.push({
+      id: 'cache:pnpm-store',
+      name: 'pnpm 全局内容寻址存储 (pnpm store prune)',
+      category: 'package-cache',
+      node: 'local',
+      nodeLabel: `本机 (${hostname()})`,
+      sizeText: formatBytes(bytes),
+      reclaimableText: bytes > 500 * 1024 * 1024 ? '支持修剪孤立包' : '体积健康',
+      reclaimableBytes: 0,
+      actionable: bytes > 500 * 1024 * 1024,
+      detail: `${pnpmStoreDir} (清理未被任何项目硬链接引用的孤立包)`,
+    })
+  }
+
+  // 3. uv 全局 Wheel 与源码构建缓存 (~/.cache/uv)
+  const uvCacheDir = join(home, '.cache', 'uv')
+  if (existsSync(uvCacheDir)) {
+    const duRes = await runCmd('du', ['-sb', uvCacheDir], 8000)
+    const bytes = Number(duRes.stdout.trim().split(/\s+/)[0]) || 0
+    items.push({
+      id: 'cache:uv-prune',
+      name: 'uv Python 全局缓存 (uv cache prune)',
+      category: 'package-cache',
+      node: 'local',
+      nodeLabel: `本机 (${hostname()})`,
+      sizeText: formatBytes(bytes),
+      reclaimableText: bytes > 500 * 1024 * 1024 ? '支持修剪过期轮子' : '体积健康',
+      reclaimableBytes: 0,
+      actionable: bytes > 500 * 1024 * 1024,
+      detail: `${uvCacheDir} (uv cache prune 安全移除未引用缓存层)`,
+    })
+  }
+
+  // 4. Playwright 历史旧版浏览器内核 (~/.cache/ms-playwright)
+  const pwDir = join(home, '.cache', 'ms-playwright')
+  if (existsSync(pwDir)) {
+    try {
+      const entries = readdirSync(pwDir)
+      const groups: Record<string, Array<{ dir: string; rev: number; bytes: number }>> = {}
+      let totalPwBytes = 0
+      for (const entry of entries) {
+        const m = entry.match(/^(chromium|chromium_headless_shell|firefox|webkit)-(\d+)$/)
+        const full = join(pwDir, entry)
+        const duRes = await runCmd('du', ['-sb', full], 6000)
+        const bytes = Number(duRes.stdout.trim().split(/\s+/)[0]) || 0
+        totalPwBytes += bytes
+        if (m) {
+          const prefix = m[1]!
+          const rev = Number(m[2])
+          groups[prefix] = groups[prefix] ?? []
+          groups[prefix]!.push({ dir: entry, rev, bytes })
+        }
+      }
+      let oldBytes = 0
+      const oldDirs: string[] = []
+      for (const list of Object.values(groups)) {
+        if (list.length <= 1) continue
+        list.sort((a, b) => b.rev - a.rev)
+        for (const stale of list.slice(1)) {
+          oldBytes += stale.bytes
+          oldDirs.push(stale.dir)
+        }
+      }
+      items.push({
+        id: 'cache:playwright-old',
+        name: 'Playwright 历史旧版浏览器内核',
+        category: 'browser-cache',
+        node: 'local',
+        nodeLabel: `本机 (${hostname()})`,
+        sizeText: formatBytes(totalPwBytes),
+        reclaimableText: oldDirs.length > 0 ? `${formatBytes(oldBytes)} (${oldDirs.length} 个旧版)` : '0 B (仅保留最新)',
+        reclaimableBytes: oldBytes,
+        actionable: oldDirs.length > 0,
+        detail:
+          oldDirs.length > 0
+            ? `可安全移除旧内核: ${oldDirs.join(', ')}（保留每个系列的最高版本）`
+            : `${pwDir} 当前无冗余历史内核`,
+      })
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // 5. Systemd Journal 系统日志归档
+  const jRes = await runCmd('journalctl', ['--disk-usage'], 5000)
+  if (jRes.code === 0 && jRes.stdout.trim()) {
+    const m = jRes.stdout.match(/take up\s+([0-9.]+\s*[A-Za-z]+)/i)
+    const sizeStr = m?.[1] ?? 'unknown'
+    const bytes = parseSizeToBytes(sizeStr)
+    const reclaim = Math.max(0, bytes - 200 * 1024 * 1024)
+    items.push({
+      id: 'log:journal-vacuum',
+      name: 'Systemd Journal 系统日志归档',
+      category: 'system-log',
+      node: 'local',
+      nodeLabel: `本机 (${hostname()})`,
+      sizeText: sizeStr,
+      reclaimableText: reclaim > 0 ? formatBytes(reclaim) : '0 B (≤200MB)',
+      reclaimableBytes: reclaim,
+      actionable: bytes > 250 * 1024 * 1024,
+      detail: 'journalctl --vacuum-size=200M (保留最近 200MB 日志)',
+    })
+  }
+
+  const totalReclaimableBytes = items.reduce((sum, i) => sum + i.reclaimableBytes, 0)
+  return {
+    items,
+    actionableCount: items.filter((i) => i.actionable).length,
+    totalReclaimableBytes,
+    totalReclaimableText: formatBytes(totalReclaimableBytes),
+  }
+}
+
+export async function runCleanupItem(
+  id: string,
+): Promise<{ ok: boolean; message: string; output?: string }> {
+  if (id.startsWith('docker-prune:')) {
+    const nodeId = id.slice('docker-prune:'.length)
+    const dockerNodes = await resolveDockerNodes()
+    const nodeCfg = dockerNodes.find((n) => n.id === nodeId)
+    if (!nodeCfg) return { ok: false, message: `未找到 Docker 节点: ${nodeId}` }
+    const res = await execOnDockerNode(nodeCfg, 'docker image prune -f && docker builder prune -f', 180000)
+    return {
+      ok: res.code === 0,
+      message: res.code === 0 ? `${nodeCfg.label} Docker 悬空镜像与构建缓存已清理` : `Docker 清理失败 (exit ${res.code})`,
+      output: (res.stdout + '\n' + res.stderr).trim().slice(-1500),
+    }
+  }
+
+  if (id === 'cache:pnpm-store') {
+    const pnpmBin = existsSync('/usr/bin/pnpm') ? '/usr/bin/pnpm' : 'pnpm'
+    const res = await runCmd(pnpmBin, ['store', 'prune'], 180000)
+    return {
+      ok: res.code === 0,
+      message: res.code === 0 ? 'pnpm store 孤立包缓存已修剪完成' : `pnpm store prune 失败 (exit ${res.code})`,
+      output: (res.stdout + '\n' + res.stderr).trim().slice(-1500),
+    }
+  }
+
+  if (id === 'cache:uv-prune') {
+    const uvBin = await resolveUvBin()
+    const res = await runCmd(uvBin, ['cache', 'prune'], 180000)
+    return {
+      ok: res.code === 0,
+      message: res.code === 0 ? 'uv 过期缓存层已修剪完成' : `uv cache prune 失败 (exit ${res.code})`,
+      output: (res.stdout + '\n' + res.stderr).trim().slice(-1500),
+    }
+  }
+
+  if (id === 'cache:playwright-old') {
+    const pwDir = join(homedir(), '.cache', 'ms-playwright')
+    if (!existsSync(pwDir)) return { ok: true, message: 'Playwright 缓存目录不存在，无需清理' }
+    const entries = readdirSync(pwDir)
+    const groups: Record<string, Array<{ dir: string; rev: number }>> = {}
+    for (const entry of entries) {
+      const m = entry.match(/^(chromium|chromium_headless_shell|firefox|webkit)-(\d+)$/)
+      if (m) {
+        const prefix = m[1]!
+        groups[prefix] = groups[prefix] ?? []
+        groups[prefix]!.push({ dir: entry, rev: Number(m[2]) })
+      }
+    }
+    const toRemove: string[] = []
+    for (const list of Object.values(groups)) {
+      if (list.length <= 1) continue
+      list.sort((a, b) => b.rev - a.rev)
+      for (const stale of list.slice(1)) {
+        toRemove.push(stale.dir)
+      }
+    }
+    if (toRemove.length === 0) {
+      return { ok: true, message: '当前没有冗余的旧版 Playwright 浏览器内核' }
+    }
+    const targetPaths = toRemove.map((d) => join(pwDir, d))
+    const res = await runCmd('rm', ['-rf', ...targetPaths], 60000)
+    return {
+      ok: res.code === 0,
+      message:
+        res.code === 0
+          ? `已清理 ${toRemove.length} 个旧版 Playwright 内核（${toRemove.join(', ')}）`
+          : `清理 Playwright 旧内核失败 (exit ${res.code})`,
+      output: toRemove.join('\n'),
+    }
+  }
+
+  if (id === 'log:journal-vacuum') {
+    const res = await runCmd('sudo', ['journalctl', '--vacuum-size=200M'], 60000)
+    return {
+      ok: res.code === 0,
+      message: res.code === 0 ? 'Systemd Journal 日志已压缩至 200MB 以内' : `Journal 清理失败 (exit ${res.code})`,
+      output: (res.stdout + '\n' + res.stderr).trim().slice(-1500),
+    }
+  }
+
+  return { ok: false, message: `未知的清理项: ${id}` }
+}
+
+// ── Systemd 守护进程与定时任务健康巡检（Failed Units & Timers） ─────────────
+
+export async function scanSystemdHealth(): Promise<{
+  failedUnits: SystemdUnitRow[]
+  failedCount: number
+  activeTimersCount: number
+}> {
+  const failedUnits: SystemdUnitRow[] = []
+
+  const parseUnits = (raw: string, scope: 'system' | 'user') => {
+    try {
+      const arr = JSON.parse(raw) as Array<{
+        unit?: string
+        load?: string
+        active?: string
+        sub?: string
+        description?: string
+      }>
+      if (!Array.isArray(arr)) return
+      for (const u of arr) {
+        if (!u?.unit) continue
+        failedUnits.push({
+          id: `${scope}:${u.unit}`,
+          unit: u.unit,
+          scope,
+          loadState: u.load ?? 'loaded',
+          activeState: u.active ?? 'failed',
+          subState: u.sub ?? 'failed',
+          description: u.description ?? u.unit,
+          actionable: true,
+        })
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const [sysFailedRes, userFailedRes, timersRes] = await Promise.all([
+    runCmd('systemctl', ['list-units', '--state=failed', '--output=json', '--no-pager'], 5000),
+    runCmd('systemctl', ['--user', 'list-units', '--state=failed', '--output=json', '--no-pager'], 5000),
+    runCmd('systemctl', ['list-timers', '--all', '--output=json', '--no-pager'], 5000),
+  ])
+
+  if (sysFailedRes.code === 0 && sysFailedRes.stdout.trim()) {
+    parseUnits(sysFailedRes.stdout, 'system')
+  }
+  if (userFailedRes.code === 0 && userFailedRes.stdout.trim()) {
+    parseUnits(userFailedRes.stdout, 'user')
+  }
+
+  let activeTimersCount = 0
+  try {
+    const timers = JSON.parse(timersRes.stdout)
+    if (Array.isArray(timers)) activeTimersCount = timers.length
+  } catch {
+    /* ignore */
+  }
+
+  return {
+    failedUnits,
+    failedCount: failedUnits.length,
+    activeTimersCount,
+  }
+}
+
+export async function fixSystemdUnit(
+  id: string,
+): Promise<{ ok: boolean; message: string; output?: string }> {
+  if (id === 'all') {
+    const [sysRes, userRes] = await Promise.all([
+      runCmd('sudo', ['systemctl', 'reset-failed'], 15000),
+      runCmd('systemctl', ['--user', 'reset-failed'], 15000),
+    ])
+    const ok = sysRes.code === 0
+    return {
+      ok,
+      message: ok ? '已重置所有残留的 Systemd failed 状态单元' : `重置失败状态单元出错 (exit ${sysRes.code})`,
+      output: (sysRes.stdout + '\n' + sysRes.stderr + '\n' + userRes.stderr).trim().slice(-1500),
+    }
+  }
+
+  const [scope, ...rest] = id.split(':')
+  const unit = rest.join(':')
+  if (!unit || !/^[a-zA-Z0-9@_.:-]+$/.test(unit)) {
+    return { ok: false, message: `非法的 Systemd 单元标识: ${id}` }
+  }
+  const res =
+    scope === 'user'
+      ? await runCmd('systemctl', ['--user', 'reset-failed', unit], 15000)
+      : await runCmd('sudo', ['systemctl', 'reset-failed', unit], 15000)
+  return {
+    ok: res.code === 0,
+    message: res.code === 0 ? `已重置异常单元 ${unit} 的报错状态` : `重置 ${unit} 失败 (exit ${res.code})`,
+    output: (res.stdout + '\n' + res.stderr).trim().slice(-1500),
   }
 }

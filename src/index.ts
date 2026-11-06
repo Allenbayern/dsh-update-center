@@ -45,6 +45,9 @@ import {
   updateSafeApt,
   updateToolchainItem,
   updateProjectVenv,
+  pullGitRepo,
+  runCleanupItem,
+  fixSystemdUnit,
 } from './host/infra.js'
 
 export const name = '@dsh-external/dsh-update-center'
@@ -1065,6 +1068,120 @@ export function apply(ctx: Context, config: Config): void {
             }
           },
         },
+        {
+          kind: 'exact',
+          path: API + '/infra/git-pull',
+          handler: async (req: any, res: any) => {
+            if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method-not-allowed' })
+            if (activeOperation !== null || batch.running()) {
+              return json(res, 409, {
+                ok: false,
+                message: `当前正在执行「${activeOperation?.label ?? '批量更新'}」，请等待完成后再操作`,
+                activeOperation,
+              })
+            }
+            const body = await readBody(req)
+            const id = String(body?.id ?? '').trim()
+            if (!id) {
+              return json(res, 400, { ok: false, message: '需要 Git 仓库 id（如 skill:baimiao）' })
+            }
+            activeOperation = { key: `git:${id}`, label: `同步 Git 仓库 ${id}`, startedAt: Date.now() }
+            try {
+              pushLog({ at: Date.now(), kind: 'state', text: `[infra] 开始快进同步 Git 仓库 ${id}` })
+              const result = await pullGitRepo(id)
+              pushLog({ at: Date.now(), kind: result.ok ? 'state' : 'log', text: `[infra] ${result.message}` })
+              appendHistory(
+                {
+                  at: new Date().toISOString(),
+                  kind: 'git',
+                  name: id,
+                  ok: result.ok,
+                  message: result.message,
+                },
+                config.historyLimit,
+              )
+              const infra = await scanInfra({ refresh: true })
+              json(res, result.ok ? 200 : 500, { ...result, infra })
+            } finally {
+              activeOperation = null
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: API + '/infra/cleanup',
+          handler: async (req: any, res: any) => {
+            if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method-not-allowed' })
+            if (activeOperation !== null || batch.running()) {
+              return json(res, 409, {
+                ok: false,
+                message: `当前正在执行「${activeOperation?.label ?? '批量更新'}」，请等待完成后再操作`,
+                activeOperation,
+              })
+            }
+            const body = await readBody(req)
+            const id = String(body?.id ?? '').trim()
+            if (!id) {
+              return json(res, 400, { ok: false, message: '需要清理项 id（如 docker-prune:local / cache:pnpm-store）' })
+            }
+            activeOperation = { key: `cleanup:${id}`, label: `清理缓存 ${id}`, startedAt: Date.now() }
+            try {
+              pushLog({ at: Date.now(), kind: 'state', text: `[infra] 开始执行安全清理 ${id}` })
+              const result = await runCleanupItem(id)
+              pushLog({ at: Date.now(), kind: result.ok ? 'state' : 'log', text: `[infra] ${result.message}` })
+              appendHistory(
+                {
+                  at: new Date().toISOString(),
+                  kind: 'cleanup',
+                  name: id,
+                  ok: result.ok,
+                  message: result.message,
+                },
+                config.historyLimit,
+              )
+              const infra = await scanInfra({ refresh: true })
+              json(res, result.ok ? 200 : 500, { ...result, infra })
+            } finally {
+              activeOperation = null
+            }
+          },
+        },
+        {
+          kind: 'exact',
+          path: API + '/infra/systemd-fix',
+          handler: async (req: any, res: any) => {
+            if (req.method !== 'POST') return json(res, 405, { ok: false, error: 'method-not-allowed' })
+            if (activeOperation !== null || batch.running()) {
+              return json(res, 409, {
+                ok: false,
+                message: `当前正在执行「${activeOperation?.label ?? '批量更新'}」，请等待完成后再操作`,
+                activeOperation,
+              })
+            }
+            const body = await readBody(req)
+            const id = String(body?.id ?? 'all').trim()
+            activeOperation = { key: `systemd:${id}`, label: `重置 Systemd 异常单元 ${id}`, startedAt: Date.now() }
+            try {
+              pushLog({ at: Date.now(), kind: 'state', text: `[infra] 重置 Systemd 异常单元 ${id}` })
+              const result = await fixSystemdUnit(id)
+              pushLog({ at: Date.now(), kind: result.ok ? 'state' : 'log', text: `[infra] ${result.message}` })
+              appendHistory(
+                {
+                  at: new Date().toISOString(),
+                  kind: 'systemd',
+                  name: `systemd:${id}`,
+                  ok: result.ok,
+                  message: result.message,
+                },
+                config.historyLimit,
+              )
+              const infra = await scanInfra({ refresh: true })
+              json(res, result.ok ? 200 : 500, { ...result, infra })
+            } finally {
+              activeOperation = null
+            }
+          },
+        },
       ]
       const registered = routes.map((route) => webServer.register(route))
       logger?.info?.('[update-center] 已注册 ' + routes.length + ' 条路由于 ' + API)
@@ -1086,16 +1203,37 @@ export function apply(ctx: Context, config: Config): void {
       const definition = defineTool({
         name: 'dsh_update_center',
         description:
-          '扫描并更新本机与跨节点运维组件：DSH 本体、已装插件与套件（npm / 本地链接 / git / 压缩包 / 注入）、三节点 Docker 容器（VM100 / iStoreOS / fnOS）、双节点 APT 系统安全包（VM100 / PVE）、本机核心工具链（uv / pnpm / litellm / 全局 CLI / Obsidian）与项目 Python 虚拟环境（.venv）。action=scan 返回 DSH 总览；action=infra-scan 返回跨节点 Docker、APT、工具链与项目 .venv 审计快照；action=docker-update 更新指定节点的非锁定容器；action=apt-update 更新指定节点的安全非内核 APT 包；action=toolchain-update 更新本机指定 CLI/桌面工具；action=venv-update 更新指定项目 .venv 的同主版本安全包；action=update 升级单个套件（热更新，不重启）；action=convert 把本地链接/git/压缩包/注入的条目换成上游 registry 依赖；action=update-all 串行更新所有可更新套件；action=batch 查批量进度；action=core-update 一键更新 DSH 本体；action=history 查更新历史。',
+          '扫描并更新本机与跨节点运维组件：DSH 本体、已装插件与套件（npm / 本地链接 / git / 压缩包 / 注入）、跨节点 Docker 容器、跨节点 APT 系统安全包、本机核心工具链与独立二进制（uv / pnpm / litellm / 全局 CLI / Obsidian / Node / Caddy / Tailscale）、项目 Python 虚拟环境（.venv）、Git 上游仓库与 Agent Skills 追更、跨节点存储与缓存 GC 瘦身、以及 Systemd 守护进程健康巡检。action=scan 返回 DSH 总览；action=infra-scan 返回全栈基础设施审计快照；action=docker-update 更新指定节点的非锁定容器；action=apt-update 更新指定节点的安全非内核 APT 包；action=toolchain-update 更新本机指定 CLI/桌面/二进制工具；action=venv-update 更新指定项目 .venv 的同主版本安全包；action=git-pull 快进拉取指定上游 Git 仓库/Skill；action=cleanup 执行指定缓存或悬空镜像安全清理；action=systemd-fix 重置异常 Systemd 单元；action=update 升级单个套件（热更新，不重启）；action=convert 把本地链接/git/压缩包/注入的条目换成上游 registry 依赖；action=update-all 串行更新所有可更新套件；action=batch 查批量进度；action=core-update 一键更新 DSH 本体；action=history 查更新历史。',
         parameters: {
           action: {
             type: 'string',
-            enum: ['scan', 'infra-scan', 'docker-update', 'apt-update', 'toolchain-update', 'venv-update', 'update', 'convert', 'update-all', 'batch', 'core-update', 'history'],
+            enum: [
+              'scan',
+              'infra-scan',
+              'docker-update',
+              'apt-update',
+              'toolchain-update',
+              'venv-update',
+              'git-pull',
+              'cleanup',
+              'systemd-fix',
+              'update',
+              'convert',
+              'update-all',
+              'batch',
+              'core-update',
+              'history',
+            ],
             required: true,
-            description: 'scan=DSH总览；infra-scan=跨节点Docker/APT/工具链/venv审计；docker-update=更新容器；apt-update=更新安全APT包；toolchain-update=更新本机工具；venv-update=更新项目Python虚拟环境；update=升级单个套件；convert=本地源转线上；update-all=批量升级；batch=批量进度；core-update=更新 DSH 本体；history=更新历史',
+            description:
+              'scan=DSH总览；infra-scan=全栈基础设施审计；docker-update=更新容器；apt-update=更新安全APT包；toolchain-update=更新本机工具；venv-update=更新项目Python虚拟环境；git-pull=拉取Git仓库/Skill；cleanup=清理缓存/悬空镜像；systemd-fix=重置Systemd异常单元；update=升级单个套件；convert=本地源转线上；update-all=批量升级；batch=批量进度；core-update=更新 DSH 本体；history=更新历史',
           },
-          node: { type: 'string', description: 'docker-update / apt-update 时的目标节点 id（默认本机 local，或已发现的 vm100 / istoreos / fnos / pve 等）' },
-          name: { type: 'string', description: 'update / convert 时的套件包名，docker-update 时的容器名，toolchain-update 时的工具 id（如 uv/pnpm/litellm/obsidian/npm:<pkg>/uv-tool:<tool>），或 venv-update 时的项目 id' },
+          node: { type: 'string', description: 'docker-update / apt-update 时的目标节点 id（默认本机 local，或已发现的远端节点）' },
+          name: {
+            type: 'string',
+            description:
+              'update / convert 时的套件包名，docker-update 时的容器名，toolchain-update 时的工具 id，venv-update 时的项目 id，git-pull 时的仓库 id（如 skill:baimiao），cleanup 时的清理项 id（如 docker-prune:local / cache:pnpm-store / cache:playwright-old），或 systemd-fix 时的单元 id（默认 all）',
+          },
           version: { type: 'string', description: 'update / core-update / convert 时的目标版本（取 scan 结果里的 stable/preview 版本号；convert 省略则用上游最新版）' },
           injected: { type: 'boolean', description: 'convert 时说明这是运行时注入条目（超级注入器），装成线上依赖后还需 dev_uninject_plugin 解除注入' },
           confirmOverwrite: {
@@ -1160,7 +1298,86 @@ export function apply(ctx: Context, config: Config): void {
                 }
               }
             }
+            if (infra.gitRepos) {
+              lines.push(
+                `\nGit 上游仓库与 Agent Skills（可快进同步 ${infra.gitRepos.updatableCount} 个 / 改动锁定 ${infra.gitRepos.lockedCount} 个 / 共 ${infra.gitRepos.repos.length} 个）：`,
+              )
+              for (const r of infra.gitRepos.repos) {
+                const tag = r.status === 'update' ? `🟡落后 ${r.behindCount} 个提交` : r.status === 'locked' ? `🔒已锁定 (${r.lockReason ?? ''})` : '🟢最新'
+                lines.push(`- [${r.id}] ${r.name} (${r.branch} @ ${r.localCommit}${r.remoteCommit ? ' → ' + r.remoteCommit : ''}) → ${tag}`)
+              }
+            }
+            if (infra.cleanups) {
+              lines.push(
+                `\n跨节点存储与缓存瘦身 GC（可清理项 ${infra.cleanups.actionableCount} 个 / 预计可释放 ${infra.cleanups.totalReclaimableText}）：`,
+              )
+              for (const c of infra.cleanups.items) {
+                lines.push(`- [${c.id}] ${c.name}: 当前占用 ${c.sizeText}，可释放 ${c.reclaimableText} (${c.actionable ? '🧹建议清理' : '🟢健康'})`)
+              }
+            }
+            if (infra.systemdHealth) {
+              lines.push(
+                `\nSystemd 守护进程与定时任务巡检（异常单元 ${infra.systemdHealth.failedCount} 个 / 活跃定时器 ${infra.systemdHealth.activeTimersCount} 个）：`,
+              )
+              for (const u of infra.systemdHealth.failedUnits) {
+                lines.push(`- [${u.id}] ${u.unit} (${u.scope}): ${u.activeState}/${u.subState} — ${u.description}`)
+              }
+            }
             return { report: lines.join('\n') }
+          }
+
+          if (action === 'git-pull') {
+            const id = String(args?.name ?? '').trim()
+            if (!id) {
+              return { report: 'git-pull 需要 name 参数指定 Git 仓库 id（如 skill:baimiao / plugin:dsh-retro）' }
+            }
+            const res = await pullGitRepo(id)
+            appendHistory(
+              {
+                at: new Date().toISOString(),
+                kind: 'git',
+                name: id,
+                ok: res.ok,
+                message: res.message,
+              },
+              config.historyLimit,
+            )
+            return { report: `${res.ok ? 'OK' : 'FAIL'} | ${res.message}${res.output ? '\n' + res.output : ''}` }
+          }
+
+          if (action === 'cleanup') {
+            const id = String(args?.name ?? '').trim()
+            if (!id) {
+              return { report: 'cleanup 需要 name 参数指定清理项 id（如 docker-prune:local / cache:pnpm-store / cache:uv-prune / cache:playwright-old / log:journal-vacuum）' }
+            }
+            const res = await runCleanupItem(id)
+            appendHistory(
+              {
+                at: new Date().toISOString(),
+                kind: 'cleanup',
+                name: id,
+                ok: res.ok,
+                message: res.message,
+              },
+              config.historyLimit,
+            )
+            return { report: `${res.ok ? 'OK' : 'FAIL'} | ${res.message}${res.output ? '\n' + res.output : ''}` }
+          }
+
+          if (action === 'systemd-fix') {
+            const id = String(args?.name ?? 'all').trim() || 'all'
+            const res = await fixSystemdUnit(id)
+            appendHistory(
+              {
+                at: new Date().toISOString(),
+                kind: 'systemd',
+                name: `systemd:${id}`,
+                ok: res.ok,
+                message: res.message,
+              },
+              config.historyLimit,
+            )
+            return { report: `${res.ok ? 'OK' : 'FAIL'} | ${res.message}${res.output ? '\n' + res.output : ''}` }
           }
 
           if (action === 'toolchain-update') {

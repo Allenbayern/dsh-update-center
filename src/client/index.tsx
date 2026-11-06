@@ -15,16 +15,19 @@ import type {
   ApplyResult,
   AptPackageRow,
   BatchState,
+  CleanupItemRow,
   ConvertResult,
   CoreRunState,
   DockerContainerRow,
   EnvFacts,
+  GitRepoRow,
   HistoryEntry,
   InfraSnapshot,
   PendingRestartItem,
   ProjectVenvRow,
   ReminderState,
   Snapshot,
+  SystemdUnitRow,
   ToolchainRow,
   UpdateRow,
 } from '../shared/types.js'
@@ -752,6 +755,9 @@ const HISTORY_KIND: Record<string, { text: string; tone: string }> = {
   apt: { text: '系统包', tone: C.ok },
   toolchain: { text: '工具链', tone: C.brand },
   venv: { text: 'Python环境', tone: C.ok },
+  git: { text: 'Git仓库', tone: C.brand },
+  cleanup: { text: '瘦身清理', tone: C.ok },
+  systemd: { text: 'Systemd', tone: C.warn },
 }
 
 function HistoryCard({ entries }: { entries: HistoryEntry[] }) {
@@ -860,7 +866,17 @@ function EnvSection({ env, deepLoading, onDeep }: { env: EnvFacts; deepLoading: 
   )
 }
 
-type ViewTab = 'overview' | 'dsh' | 'docker' | 'apt' | 'toolchain' | 'venv' | 'history'
+type ViewTab =
+  | 'overview'
+  | 'dsh'
+  | 'docker'
+  | 'apt'
+  | 'toolchain'
+  | 'venv'
+  | 'git'
+  | 'cleanup'
+  | 'systemd'
+  | 'history'
 
 function InfraSection({
   infra,
@@ -875,6 +891,9 @@ function InfraSection({
   onUpdateApt,
   onUpdateToolchain,
   onUpdateVenv,
+  onPullGit,
+  onRunCleanup,
+  onFixSystemd,
 }: {
   infra: InfraSnapshot | undefined
   loading: boolean
@@ -888,6 +907,9 @@ function InfraSection({
   onUpdateApt: (node: string) => void
   onUpdateToolchain: (id: string, name: string) => void
   onUpdateVenv: (projectId: string, projectName: string) => void
+  onPullGit: (id: string, name: string) => void
+  onRunCleanup: (id: string, name: string) => void
+  onFixSystemd: (id: string, name: string) => void
 }) {
   const [showLockedApt, setShowLockedApt] = useState(false)
   const containersAll = infra?.docker.containers ?? []
@@ -919,10 +941,26 @@ function InfraSection({
     : venvProjectsAll
   const venvTotalSafe = infra?.venvs?.totalSafeUpdatable ?? 0
 
+  const gitReposAll: GitRepoRow[] = infra?.gitRepos?.repos ?? []
+  const gitRepos = onlyActionable ? gitReposAll.filter((r) => r.status !== 'latest') : gitReposAll
+  const gitUpdatable = infra?.gitRepos?.updatableCount ?? 0
+  const gitLocked = infra?.gitRepos?.lockedCount ?? 0
+
+  const cleanupItemsAll: CleanupItemRow[] = infra?.cleanups?.items ?? []
+  const cleanupItems = onlyActionable ? cleanupItemsAll.filter((c) => c.actionable) : cleanupItemsAll
+  const cleanupActionable = infra?.cleanups?.actionableCount ?? 0
+  const cleanupReclaimText = infra?.cleanups?.totalReclaimableText ?? '0 B'
+
+  const systemdFailedAll: SystemdUnitRow[] = infra?.systemdHealth?.failedUnits ?? []
+  const systemdTimersCount = infra?.systemdHealth?.activeTimersCount ?? 0
+
   const showDocker = activeTab === 'overview' || activeTab === 'docker'
   const showApt = activeTab === 'overview' || activeTab === 'apt'
   const showToolchain = activeTab === 'overview' || activeTab === 'toolchain'
   const showVenv = activeTab === 'overview' || activeTab === 'venv'
+  const showGit = activeTab === 'overview' || activeTab === 'git'
+  const showCleanup = activeTab === 'overview' || activeTab === 'cleanup'
+  const showSystemd = activeTab === 'overview' || activeTab === 'systemd'
 
   const renderAptRow = (pkg: AptPackageRow, idx: number, total: number) => (
     <Row key={`${pkg.node}:${pkg.name}`} last={idx === total - 1}>
@@ -1207,6 +1245,195 @@ function InfraSection({
           )}
         </Section>
       ) : null}
+
+      {showGit ? (
+        <Section
+          title="🌿 Git 上游仓库与 Agent Skills 追更 (仅快进同步)"
+          count={
+            infra?.gitRepos === undefined
+              ? '未加载'
+              : `${gitReposAll.length} 个仓库 · ${gitUpdatable} 可快进 · ${gitLocked} 改动锁定`
+          }
+        >
+          {infra?.gitRepos === undefined ? (
+            <Empty>随运维组件扫描一并检测 ~/.agents/skills、~/dsh-plugins 与项目目录的 Git 上游提交。</Empty>
+          ) : gitRepos.length === 0 ? (
+            <Empty>{onlyActionable ? '所有受管 Git 仓库与 Agent Skills 均已与上游同步。' : '未检测到带远程源的 Git 仓库。'}</Empty>
+          ) : (
+            gitRepos.map((repo, idx) => {
+              const key = `git:${repo.id}`
+              const isBusy = busyKey === key
+              const isCompleted = completedKeys[key] !== undefined
+              const effectiveStatus = isCompleted ? 'latest' : repo.status
+              const kindLabel = repo.category === 'skill' ? 'Agent Skill' : repo.category === 'dsh-plugin' ? 'DSH 插件' : '工程仓库'
+              return (
+                <Row key={repo.id} last={idx === gitRepos.length - 1}>
+                  <span style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 200, flex: '1 1 240px' }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <Tag tone={C.dim}>{kindLabel}</Tag>
+                      <Name>{repo.name}</Name>
+                      <Meta>
+                        {repo.branch} @ {isCompleted ? (repo.remoteCommit ?? repo.localCommit) : repo.localCommit}
+                        {!isCompleted && repo.remoteCommit && repo.remoteCommit !== repo.localCommit ? ` → ${repo.remoteCommit}` : ''}
+                      </Meta>
+                    </span>
+                    <Meta>{isCompleted ? '刚刚已完成快进同步，当前已是最新提交' : (repo.lockReason ?? repo.detail ?? repo.repoPath)}</Meta>
+                  </span>
+                  <Actions>
+                    {isBusy ? (
+                      <Btn size="sm" disabled title="当前仓库正在拉取并编译中，请稍候…">
+                        ⏳ 拉取同步中…
+                      </Btn>
+                    ) : effectiveStatus === 'update' ? (
+                      <Btn
+                        tone="primary"
+                        size="sm"
+                        disabled={anyBusy}
+                        title={anyBusy ? '当前有其他更新任务正在执行，请等待完成后再操作' : `一键 git pull --ff-only 同步 ${repo.name}`}
+                        onClick={() => onPullGit(repo.id, repo.name)}
+                      >
+                        {anyBusy ? '⏸ 等待当前任务…' : `快进拉取 (+${repo.behindCount})`}
+                      </Btn>
+                    ) : effectiveStatus === 'locked' ? (
+                      <Tag tone={C.warn}>本地改动锁定</Tag>
+                    ) : (
+                      <Tag tone={C.ok}>已最新</Tag>
+                    )}
+                  </Actions>
+                </Row>
+              )
+            })
+          )}
+        </Section>
+      ) : null}
+
+      {showCleanup ? (
+        <Section
+          title="🧹 跨节点存储与缓存瘦身 GC (悬空镜像 / 构建缓存 / 旧版内核)"
+          count={
+            infra?.cleanups === undefined
+              ? '未加载'
+              : `可清理 ${cleanupActionable} 项 · 预计可释放 ${cleanupReclaimText}`
+          }
+        >
+          {infra?.cleanups === undefined ? (
+            <Empty>随运维组件扫描一并统计各节点 Docker 悬空镜像、pnpm/uv 缓存、Playwright 旧浏览器与 Journald 日志。</Empty>
+          ) : cleanupItems.length === 0 ? (
+            <Empty>{onlyActionable ? '所有节点存储与缓存均处于健康水位，无需清理。' : '未发现可统计的缓存目录。'}</Empty>
+          ) : (
+            cleanupItems.map((item, idx) => {
+              const key = `cleanup:${item.id}`
+              const isBusy = busyKey === key
+              const isCompleted = completedKeys[key] !== undefined
+              const effectiveActionable = isCompleted ? false : item.actionable
+              return (
+                <Row key={item.id} last={idx === cleanupItems.length - 1}>
+                  <span style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 200, flex: '1 1 240px' }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <Tag tone={C.dim}>{item.nodeLabel}</Tag>
+                      <Name>{item.name}</Name>
+                      <Tag tone={effectiveActionable ? C.brand : C.ok}>
+                        {isCompleted ? '已释放完成' : `可释放 ${item.reclaimableText} / 总计 ${item.sizeText}`}
+                      </Tag>
+                    </span>
+                    <Meta>{isCompleted ? '刚刚已完成安全瘦身清理，在用容器与活跃依赖不受影响' : item.detail}</Meta>
+                  </span>
+                  <Actions>
+                    {isBusy ? (
+                      <Btn size="sm" disabled title="当前正在执行安全清理中，请稍候…">
+                        ⏳ 正在清理…
+                      </Btn>
+                    ) : effectiveActionable ? (
+                      <Btn
+                        tone="primary"
+                        size="sm"
+                        disabled={anyBusy}
+                        title={anyBusy ? '当前有其他更新任务正在执行，请等待完成后再操作' : `安全清理 ${item.name}`}
+                        onClick={() => onRunCleanup(item.id, item.name)}
+                      >
+                        {anyBusy ? '⏸ 等待当前任务…' : `一键清理 (${item.reclaimableText})`}
+                      </Btn>
+                    ) : (
+                      <Tag tone={C.ok}>清爽健康</Tag>
+                    )}
+                  </Actions>
+                </Row>
+              )
+            })
+          )}
+        </Section>
+      ) : null}
+
+      {showSystemd ? (
+        <Section
+          title="🩺 Systemd 守护进程与定时任务巡检"
+          count={
+            infra?.systemdHealth === undefined
+              ? '未加载'
+              : `异常单元 ${systemdFailedAll.length} 个 · 活跃定时器 ${systemdTimersCount} 个`
+          }
+          action={
+            systemdFailedAll.length > 0 && completedKeys['systemd:all'] === undefined ? (
+              <Btn
+                tone="primary"
+                size="sm"
+                disabled={anyBusy || busyKey === 'systemd:all'}
+                onClick={() => onFixSystemd('all', '全部异常 Systemd 单元')}
+              >
+                {busyKey === 'systemd:all'
+                  ? '⏳ 重置中…'
+                  : anyBusy
+                    ? '⏸ 等待…'
+                    : `一键重置异常单元 (${systemdFailedAll.length})`}
+              </Btn>
+            ) : null
+          }
+        >
+          {infra?.systemdHealth === undefined ? (
+            <Empty>随运维组件扫描一并巡检本机 system 与 user 级 Systemd 服务及定时器。</Empty>
+          ) : systemdFailedAll.length === 0 || completedKeys['systemd:all'] !== undefined ? (
+            <Empty>✓ 本机所有 Systemd 守护进程与 {systemdTimersCount} 个定时任务均运行正常（0 异常单元）。</Empty>
+          ) : (
+            systemdFailedAll.map((u, idx) => {
+              const key = `systemd:${u.id}`
+              const isBusy = busyKey === key || busyKey === 'systemd:all'
+              const isCompleted = completedKeys[key] !== undefined || completedKeys['systemd:all'] !== undefined
+              return (
+                <Row key={u.id} last={idx === systemdFailedAll.length - 1}>
+                  <span style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 200, flex: '1 1 240px' }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <Tag tone={isCompleted ? C.ok : C.err}>{u.scope === 'system' ? '系统级' : '用户级'}</Tag>
+                      <Name>{u.unit}</Name>
+                      <Meta>
+                        {u.activeState} / {u.subState}
+                      </Meta>
+                    </span>
+                    <Meta>{isCompleted ? '已重置失败状态' : u.description}</Meta>
+                  </span>
+                  <Actions>
+                    {isBusy ? (
+                      <Btn size="sm" disabled>
+                        ⏳ 重置中…
+                      </Btn>
+                    ) : !isCompleted ? (
+                      <Btn
+                        tone="primary"
+                        size="sm"
+                        disabled={anyBusy}
+                        onClick={() => onFixSystemd(u.id, u.unit)}
+                      >
+                        {anyBusy ? '⏸ 等待…' : '重置状态'}
+                      </Btn>
+                    ) : (
+                      <Tag tone={C.ok}>已恢复</Tag>
+                    )}
+                  </Actions>
+                </Row>
+              )
+            })
+          )}
+        </Section>
+      ) : null}
     </div>
   )
 }
@@ -1424,6 +1651,105 @@ export function PanelPage() {
         })
       } catch (caught) {
         setOutcome({ ok: false, title: `虚拟环境升级 (${projectName})`, detail: String(caught) })
+      } finally {
+        actionMutexRef.current = false
+        setInfraBusy(undefined)
+        await loadHistory()
+      }
+    },
+    [loadHistory],
+  )
+
+  const handlePullGit = useCallback(
+    async (id: string, name: string) => {
+      if (actionMutexRef.current) return
+      actionMutexRef.current = true
+      const key = `git:${id}`
+      setInfraBusy(key)
+      setOutcome(undefined)
+      try {
+        const data = await apiJson('/infra/git-pull', {
+          method: 'POST',
+          body: JSON.stringify({ id }),
+        })
+        if (data?.infra !== undefined) setInfra(data.infra as InfraSnapshot)
+        if (data?.ok === true) {
+          setCompletedKeys((prev) => ({ ...prev, [key]: 'latest' }))
+        }
+        setOutcome({
+          ok: data?.ok === true,
+          title: `Git 上游快进同步 (${name})`,
+          detail: String(data?.message ?? ''),
+          ...(data?.output ? { output: String(data.output) } : {}),
+        })
+      } catch (caught) {
+        setOutcome({ ok: false, title: `Git 上游快进同步 (${name})`, detail: String(caught) })
+      } finally {
+        actionMutexRef.current = false
+        setInfraBusy(undefined)
+        await loadHistory()
+      }
+    },
+    [loadHistory],
+  )
+
+  const handleRunCleanup = useCallback(
+    async (id: string, name: string) => {
+      if (actionMutexRef.current) return
+      actionMutexRef.current = true
+      const key = `cleanup:${id}`
+      setInfraBusy(key)
+      setOutcome(undefined)
+      try {
+        const data = await apiJson('/infra/cleanup', {
+          method: 'POST',
+          body: JSON.stringify({ id }),
+        })
+        if (data?.infra !== undefined) setInfra(data.infra as InfraSnapshot)
+        if (data?.ok === true) {
+          setCompletedKeys((prev) => ({ ...prev, [key]: 'latest' }))
+        }
+        setOutcome({
+          ok: data?.ok === true,
+          title: `存储与缓存清理 (${name})`,
+          detail: String(data?.message ?? ''),
+          ...(data?.output ? { output: String(data.output) } : {}),
+        })
+      } catch (caught) {
+        setOutcome({ ok: false, title: `存储与缓存清理 (${name})`, detail: String(caught) })
+      } finally {
+        actionMutexRef.current = false
+        setInfraBusy(undefined)
+        await loadHistory()
+      }
+    },
+    [loadHistory],
+  )
+
+  const handleFixSystemd = useCallback(
+    async (id: string, name: string) => {
+      if (actionMutexRef.current) return
+      actionMutexRef.current = true
+      const key = `systemd:${id}`
+      setInfraBusy(key)
+      setOutcome(undefined)
+      try {
+        const data = await apiJson('/infra/systemd-fix', {
+          method: 'POST',
+          body: JSON.stringify({ id }),
+        })
+        if (data?.infra !== undefined) setInfra(data.infra as InfraSnapshot)
+        if (data?.ok === true) {
+          setCompletedKeys((prev) => ({ ...prev, [key]: 'latest' }))
+        }
+        setOutcome({
+          ok: data?.ok === true,
+          title: `Systemd 异常重置 (${name})`,
+          detail: String(data?.message ?? ''),
+          ...(data?.output ? { output: String(data.output) } : {}),
+        })
+      } catch (caught) {
+        setOutcome({ ok: false, title: `Systemd 异常重置 (${name})`, detail: String(caught) })
       } finally {
         actionMutexRef.current = false
         setInfraBusy(undefined)
@@ -1764,6 +2090,27 @@ export function PanelPage() {
     ) ?? 0
   const venvTotal = infra?.venvs?.projects.length ?? 0
 
+  const gitUpdatableCount =
+    infra?.gitRepos?.repos.filter(
+      (r) => r.status === 'update' && completedKeys[`git:${r.id}`] === undefined,
+    ).length ?? 0
+  const gitLockedCount = infra?.gitRepos?.lockedCount ?? 0
+  const gitTotalCount = infra?.gitRepos?.repos.length ?? 0
+
+  const cleanupActionableCount =
+    infra?.cleanups?.items.filter(
+      (c) => c.actionable && completedKeys[`cleanup:${c.id}`] === undefined,
+    ).length ?? 0
+  const cleanupTotalReclaimText = infra?.cleanups?.totalReclaimableText ?? '0 B'
+
+  const systemdFailedCount =
+    completedKeys['systemd:all'] !== undefined
+      ? 0
+      : (infra?.systemdHealth?.failedUnits.filter(
+          (u) => completedKeys[`systemd:${u.id}`] === undefined,
+        ).length ?? 0)
+  const systemdTimersCount = infra?.systemdHealth?.activeTimersCount ?? 0
+
   const filteredRegistryRows = onlyActionable
     ? registryRows.filter(
         (r) =>
@@ -1782,7 +2129,15 @@ export function PanelPage() {
     : [...localRows, ...injectedRows]
 
   const showDsh = activeTab === 'overview' || activeTab === 'dsh'
-  const showInfra = activeTab === 'overview' || activeTab === 'docker' || activeTab === 'apt' || activeTab === 'toolchain' || activeTab === 'venv'
+  const showInfra =
+    activeTab === 'overview' ||
+    activeTab === 'docker' ||
+    activeTab === 'apt' ||
+    activeTab === 'toolchain' ||
+    activeTab === 'venv' ||
+    activeTab === 'git' ||
+    activeTab === 'cleanup' ||
+    activeTab === 'systemd'
   const showHistory = activeTab === 'overview' || activeTab === 'history'
 
   const tabs: { id: ViewTab; label: string; badge?: number; tone?: string }[] = [
@@ -1792,6 +2147,9 @@ export function PanelPage() {
     { id: 'apt', label: '🛡️ 系统 APT', badge: aptSafeCount, tone: C.brand },
     { id: 'toolchain', label: `🧰 工具链 (${toolchainTotal})`, badge: toolchainUpdatable, tone: C.brand },
     { id: 'venv', label: `🐍 Python .venv (${venvTotal})`, badge: venvSafeCount, tone: C.brand },
+    { id: 'git', label: `🌿 Git 与技能 (${gitTotalCount})`, badge: gitUpdatableCount, tone: C.brand },
+    { id: 'cleanup', label: '🧹 缓存瘦身 GC', badge: cleanupActionableCount, tone: C.brand },
+    { id: 'systemd', label: '🩺 Systemd 巡检', badge: systemdFailedCount, tone: C.err },
     { id: 'history', label: `📜 日志与历史 (${history.length})` },
   ]
 
@@ -1801,7 +2159,10 @@ export function PanelPage() {
     dockerUpdatable +
     aptSafeCount +
     toolchainUpdatable +
-    venvSafeCount
+    venvSafeCount +
+    gitUpdatableCount +
+    cleanupActionableCount +
+    systemdFailedCount
 
   return (
     <div
@@ -1987,8 +2348,8 @@ export function PanelPage() {
           </div>
           <div style={{ fontSize: 18, fontWeight: 700, color: '#ffffff', letterSpacing: 0.2 }}>
             {totalActionable === 0
-              ? '✨ 全栈 6 大维度组件均已对齐最新安全基线'
-              : `⚡ 检测到 ${totalActionable} 项待处理更新或待重启项`}
+              ? '✨ 全栈 9 大维度组件均已对齐最新安全基线'
+              : `⚡ 检测到 ${totalActionable} 项待处理更新、清理或巡检项`}
           </div>
           <div style={{ fontSize: 12, color: '#cbd5e1', lineHeight: '18px' }}>
             {snapshot === undefined
@@ -2197,9 +2558,36 @@ export function PanelPage() {
               icon="🐍"
               value={infra?.venvs === undefined ? '待加载' : venvSafeCount > 0 ? `${venvSafeCount} 可更` : '已最新'}
               tone={venvSafeCount > 0 ? C.brand : C.ok}
-              hint={infra?.venvs === undefined ? '3 个项目 .venv' : `${venvTotal} 个项目同主版本已最新`}
+              hint={infra?.venvs === undefined ? '项目 .venv' : `${venvTotal} 个环境同主版本已最新`}
               active={activeTab === 'venv'}
               onClick={() => setActiveTab(activeTab === 'venv' ? 'overview' : 'venv')}
+            />
+            <Stat
+              label="Git 仓库与技能"
+              icon="🌿"
+              value={infra?.gitRepos === undefined ? '待加载' : gitUpdatableCount > 0 ? `${gitUpdatableCount} 可同步` : '已最新'}
+              tone={gitUpdatableCount > 0 ? C.brand : C.ok}
+              hint={infra?.gitRepos === undefined ? 'Skills / 插件 / 工程' : `共 ${gitTotalCount} 个 · ${gitLockedCount} 改动锁`}
+              active={activeTab === 'git'}
+              onClick={() => setActiveTab(activeTab === 'git' ? 'overview' : 'git')}
+            />
+            <Stat
+              label="存储与缓存 GC"
+              icon="🧹"
+              value={infra?.cleanups === undefined ? '待加载' : cleanupActionableCount > 0 ? `可省 ${cleanupTotalReclaimText}` : '清爽健康'}
+              tone={cleanupActionableCount > 0 ? C.brand : C.ok}
+              hint={infra?.cleanups === undefined ? 'Docker/pnpm/uv/日志' : `${cleanupActionableCount} 项建议清理`}
+              active={activeTab === 'cleanup'}
+              onClick={() => setActiveTab(activeTab === 'cleanup' ? 'overview' : 'cleanup')}
+            />
+            <Stat
+              label="Systemd 巡检"
+              icon="🩺"
+              value={infra?.systemdHealth === undefined ? '待加载' : systemdFailedCount > 0 ? `${systemdFailedCount} 异常` : '全绿健康'}
+              tone={systemdFailedCount > 0 ? C.err : C.ok}
+              hint={infra?.systemdHealth === undefined ? '服务与定时器' : `${systemdTimersCount} 个活跃定时器运行中`}
+              active={activeTab === 'systemd'}
+              onClick={() => setActiveTab(activeTab === 'systemd' ? 'overview' : 'systemd')}
             />
           </div>
 
@@ -2448,6 +2836,9 @@ export function PanelPage() {
               onUpdateApt={(node) => void handleUpdateApt(node)}
               onUpdateToolchain={(id, name) => void handleUpdateToolchain(id, name)}
               onUpdateVenv={(projectId, projectName) => void handleUpdateVenv(projectId, projectName)}
+              onPullGit={(id, name) => void handlePullGit(id, name)}
+              onRunCleanup={(id, name) => void handleRunCleanup(id, name)}
+              onFixSystemd={(id, name) => void handleFixSystemd(id, name)}
             />
           ) : null}
 
